@@ -159,3 +159,21 @@ mod tests {
         assert_eq!(half_to_f32(0), 0.0);
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod vision_tests {
+    #[test]
+    #[ignore = "needs CAPWISE_CUTOUT_PHOTO pointing at a photo of a person"]
+    fn cuts_a_person_out_of_a_photo() {
+        let path = std::env::var("CAPWISE_CUTOUT_PHOTO").unwrap();
+        let image = super::cut_out(std::path::Path::new(&path)).unwrap();
+        let (width, height) = image.dimensions();
+        let opaque = image.pixels().filter(|pixel| pixel[3] > 200).count();
+        let clear = image.pixels().filter(|pixel| pixel[3] == 0).count();
+        assert!(opaque > (width * height) as usize / 5, "{opaque}");
+        assert!(clear > 0);
+        if let Ok(out) = std::env::var("CAPWISE_CUTOUT_OUT") {
+            image.save(out).unwrap();
+        }
+    }
+}
