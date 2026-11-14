@@ -28,6 +28,22 @@ impl SubjectUi {
     fn personas(&self) -> &[Persona] {
         self.personas.get_or_init(personas::all)
     }
+
+    /// The clean pose behind the placed cutout (no sticker outline), when
+    /// this session placed it -- the better reference for a generated cover.
+    pub(crate) fn placed_source(&self) -> Option<std::path::PathBuf> {
+        let (persona_id, file) = self.placed.as_ref()?;
+        let persona = self
+            .personas()
+            .iter()
+            .find(|persona| &persona.id == persona_id)?;
+        let pose = persona
+            .manifest
+            .poses
+            .iter()
+            .find(|pose| &pose.file == file)?;
+        persona.pose_path(pose)
+    }
 }
 
 impl EditorWindow {
@@ -372,7 +388,14 @@ impl EditorWindow {
                     .gap(px(8.))
                     .child(chips)
                     .children(grid)
-                    .children(side),
+                    .children(side)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .line_height(px(16.))
+                            .text_color(Hsla::from(theme.editor.text_3))
+                            .child(tr::editor::title_cards::subject_privacy()),
+                    ),
             )
             .into_any_element()
     }

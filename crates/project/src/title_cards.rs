@@ -118,6 +118,11 @@ pub struct TitleCard {
     pub custom_text_layout: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<TitleCardSubject>,
+    /// The background is a finished cover that already carries the title
+    /// and the person, so the card draws neither its own text nor its
+    /// subject cutout.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_title: bool,
 }
 
 impl TitleCard {
@@ -132,6 +137,7 @@ impl TitleCard {
             background: TitleCardBackground::default(),
             custom_text_layout: false,
             subject: None,
+            hide_title: false,
         }
     }
 

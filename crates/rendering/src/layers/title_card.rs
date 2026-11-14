@@ -61,7 +61,7 @@ impl TitleCardLayer {
             .ok_or_else(|| RenderingError::TitleCard("Missing card design".into()))?;
         card.validate()
             .map_err(|error| RenderingError::TitleCard(error.to_string()))?;
-        if segment.content.trim().is_empty() {
+        if !card.hide_title && segment.content.trim().is_empty() {
             return Err(RenderingError::TitleCard(
                 "Enter a title before exporting the card".into(),
             ));
@@ -93,7 +93,12 @@ impl TitleCardLayer {
             self.image.clear_title_card_picture();
         }
 
-        match (&card.subject, layout.subject) {
+        // A finished cover already shows the person; drawing the cutout too
+        // would put them on it twice.
+        match (
+            card.subject.as_ref().filter(|_| !card.hide_title),
+            layout.subject,
+        ) {
             (Some(subject), Some((region, side))) => {
                 self.subject
                     .prepare_title_card_subject(
@@ -115,17 +120,23 @@ impl TitleCardLayer {
                 previous != segment || *size != output || *was_editing != editing
             })
         {
-            let mut texts = self.prepare_texts(segment, &layout)?;
-            let title = &mut texts[usize::from(!card.kicker.trim().is_empty())];
-            self.text_box = Some(crate::TitleTextFrameBox {
-                segment_index: index,
-                bounds: title.bounds,
-                font_size: title.font_size,
-                line_height: title.line_height,
-                align: title.align,
-            });
-            if editing {
-                title.opacity = 0.0;
+            let mut texts = if card.hide_title {
+                Vec::new()
+            } else {
+                self.prepare_texts(segment, &layout)?
+            };
+            self.text_box = None;
+            if let Some(title) = texts.get_mut(usize::from(!card.kicker.trim().is_empty())) {
+                self.text_box = Some(crate::TitleTextFrameBox {
+                    segment_index: index,
+                    bounds: title.bounds,
+                    font_size: title.font_size,
+                    line_height: title.line_height,
+                    align: title.align,
+                });
+                if editing {
+                    title.opacity = 0.0;
+                }
             }
             self.text
                 .prepare_exact(&constants.device, &constants.queue, output, &texts);
@@ -134,8 +145,9 @@ impl TitleCardLayer {
                 TitleCardBackground::ProjectImage { .. } => parse_color("#111827"),
             };
             let mut rectangles = vec![([0.0, 0.0, output.0 as f32, output.1 as f32], color)];
-            self.accent = layout.accent.is_some();
-            if let Some(bounds) = layout.accent {
+            let accent = layout.accent.filter(|_| !card.hide_title);
+            self.accent = accent.is_some();
+            if let Some(bounds) = accent {
                 let mut color = parse_color(&segment.color);
                 color[3] = if layout.secondary.is_some() {
                     0.22

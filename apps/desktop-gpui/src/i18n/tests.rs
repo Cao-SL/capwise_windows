@@ -661,6 +661,7 @@ fn english_matches_the_literals_it_replaced() {
         (tr::editor::assistant::hidden(), "Hide".into()),
         (tr::editor::assistant::cover_settings(), "Edit cover".into()),
         (tr::editor::assistant::cover_working(), "Making the cover…".into()),
+        (tr::editor::assistant::cover_pick(), "Pick one for the cover".into()),
         (tr::editor::assistant::regenerate(), "Make another".into()),
         (tr::editor::stickers::title(), "Stickers".into()),
         (tr::editor::stickers::tooltip(), "Insert an emoji or icon".into()),

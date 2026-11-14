@@ -44,6 +44,12 @@ pub(crate) struct CoverUi {
     applying: bool,
     result: Option<Arc<GeneratedBackground>>,
     preview: Option<Arc<RenderImage>>,
+    /// Everything one request returned, for the user to pick from. Picking
+    /// moves one into `result`/`preview` and applies it.
+    candidates: Vec<(Arc<GeneratedBackground>, Arc<RenderImage>)>,
+    /// The request painted the title (and the person) into the image, so the
+    /// card stops drawing its own.
+    finished: bool,
     /// The last applied image, kept for the assistant's result card after the
     /// generation state is cleared.
     shown: Option<Arc<RenderImage>>,
@@ -320,6 +326,7 @@ impl EditorWindow {
         state.task = None;
         state.busy = false;
         state.open = false;
+        state.candidates.clear();
         if state.save_pending.is_none() {
             state.result = None;
             state.preview = None;
@@ -385,6 +392,27 @@ impl EditorWindow {
                 })
             })
             .map(|card| card.template);
+        let card = self.project.timeline.as_ref().and_then(|timeline| {
+            timeline.text_segments.iter().find(|segment| {
+                segment
+                    .title_card
+                    .as_ref()
+                    .is_some_and(|card| card.id == target)
+            })
+        });
+        let title = card
+            .map(|segment| segment.content.trim().to_string())
+            .filter(|title| !title.is_empty() && title.chars().count() <= 80);
+        let reference_path = card
+            .and_then(|segment| segment.title_card.as_ref()?.subject.as_ref())
+            .map(|subject| {
+                self.sidebar
+                    .title_cards
+                    .subject
+                    .placed_source()
+                    .unwrap_or_else(|| self.project_path.join(&subject.path))
+            })
+            .filter(|_| title.is_some());
         let text_area = match template {
             Some(TitleCardTemplate::Hero) => TextArea::Center,
             Some(TitleCardTemplate::Editorial) => TextArea::Left,
@@ -410,8 +438,10 @@ impl EditorWindow {
         state.error = None;
         state.result = None;
         state.preview = None;
+        state.candidates.clear();
+        state.finished = title.is_some();
         state.saved = false;
-        let request = BackgroundRequest {
+        let mut request = BackgroundRequest {
             profile: cover_generation::profile_for_model(&model),
             model,
             target: Dimensions {
@@ -420,6 +450,8 @@ impl EditorWindow {
             },
             description,
             text_area,
+            title,
+            reference: None,
         };
         state.task = Some(cx.spawn_in(window, async move |this, cx| {
             let Ok(task) = cx.update(|_, cx| {
@@ -430,12 +462,37 @@ impl EditorWindow {
                     .await
                     .map_err(|_| GenerationError::InvalidCredential)?
                     .ok_or(GenerationError::InvalidCredential)?;
-                    let result = client.generate(&key, request, ticket).await?;
+                    if let Some(path) = reference_path {
+                        // A missing or unreadable photo only loses the
+                        // likeness; the cover is still worth making.
+                        request.reference = tokio::task::spawn_blocking(move || {
+                            fs::read(&path)
+                                .ok()
+                                .and_then(|bytes| cover_generation::reference_png(&bytes).ok())
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(Arc::new);
+                    }
+                    let results = client
+                        .generate_candidates(
+                            &key,
+                            request,
+                            cover_generation::COVER_CANDIDATES,
+                            ticket,
+                        )
+                        .await?;
                     let permit = cover_generation::image_decode_permit().await?;
                     tokio::task::spawn_blocking(move || {
                         let _permit = permit;
-                        let preview = thumbnail(&result.bytes)?;
-                        Ok::<_, GenerationError>((Arc::new(result), preview))
+                        results
+                            .into_iter()
+                            .map(|result| {
+                                let preview = thumbnail(&result.bytes)?;
+                                Ok::<_, GenerationError>((Arc::new(result), preview))
+                            })
+                            .collect::<Result<Vec<_>, _>>()
                     })
                     .await
                     .map_err(|_| GenerationError::InvalidImage)?
@@ -457,14 +514,14 @@ impl EditorWindow {
                     state.error = Some(tr::editor::cover::changed().into());
                 } else {
                     match result {
-                        Ok((result, preview)) if state.scope.accepts(&result, &context) => {
-                            state.result = Some(result);
-                            state.preview = Some(preview);
-                            // From the assistant the image goes straight in;
+                        Ok(candidates)
+                            if candidates
+                                .iter()
+                                .all(|(result, _)| state.scope.accepts(result, &context)) =>
+                        {
+                            // The user picks one; picking applies it and
                             // undo takes it back out.
-                            if this.assistant.cover_active {
-                                this.apply_cover_background(window, cx);
-                            }
+                            state.candidates = candidates;
                         }
                         Ok(_) => {}
                         Err(error) => state.error = Some(error_message(error)),
@@ -487,6 +544,7 @@ impl EditorWindow {
                 }
                 state.save_pending = None;
                 state.result = None;
+                state.candidates.clear();
                 state.shown = state.preview.take();
                 state.saved = true;
                 state.error = None;
@@ -544,6 +602,7 @@ impl EditorWindow {
         }
         self.sidebar.title_cards.cover.applying = true;
         self.sidebar.title_cards.cover.error = None;
+        let finished = self.sidebar.title_cards.cover.finished;
         let project_path = self.project_path.clone();
         let generation = self.sidebar.title_cards.cover.generation;
         self.sidebar.title_cards.cover.task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -590,16 +649,20 @@ impl EditorWindow {
                                 else {
                                     return Err(cap_project::TitleCardError::MissingCard);
                                 };
-                                segment.title_card.as_mut().unwrap().background =
-                                    TitleCardBackground::ProjectImage {
-                                        path: path.clone(),
-                                        // Fill the canvas: a model that
-                                        // returns a near ratio crops a sliver
-                                        // instead of leaving bars.
-                                        fit: TitleCardImageFit::Cover,
-                                        focus: XY::new(0.5, 0.5),
-                                        dim: 0.25,
-                                    };
+                                let card = segment.title_card.as_mut().unwrap();
+                                card.background = TitleCardBackground::ProjectImage {
+                                    path: path.clone(),
+                                    // Fill the canvas: a model that returns a
+                                    // near ratio crops a sliver instead of
+                                    // leaving bars.
+                                    fit: TitleCardImageFit::Cover,
+                                    focus: XY::new(0.5, 0.5),
+                                    // A finished cover is shown as made; a
+                                    // plain background is dimmed under the
+                                    // card's own title.
+                                    dim: if finished { 0.0 } else { 0.25 },
+                                };
+                                card.hide_title = finished;
                                 Ok(true)
                             },
                         );
@@ -638,6 +701,20 @@ impl EditorWindow {
         cx.notify();
     }
 
+    /// Use candidate `index` as the cover.
+    fn pick_cover_candidate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let state = &mut self.sidebar.title_cards.cover;
+        if state.busy || state.applying || state.save_pending.is_some() {
+            return;
+        }
+        let Some((result, preview)) = state.candidates.get(index).cloned() else {
+            return;
+        };
+        state.result = Some(result);
+        state.preview = Some(preview);
+        self.apply_cover_background(window, cx);
+    }
+
     pub(crate) fn assistant_cover_busy(&self) -> bool {
         let state = &self.sidebar.title_cards.cover;
         state.busy || state.applying || state.save_pending.is_some()
@@ -651,7 +728,8 @@ impl EditorWindow {
         let state = &self.sidebar.title_cards.cover;
         let image = state.preview.clone().or_else(|| state.shown.clone());
         let busy = state.busy || state.applying;
-        if !busy && image.is_none() && state.error.is_none() {
+        let picking = !busy && !state.candidates.is_empty();
+        if !busy && !picking && image.is_none() && state.error.is_none() {
             return None;
         }
         let title = self
@@ -667,55 +745,103 @@ impl EditorWindow {
             .rounded(px(10.))
             .overflow_hidden()
             .bg(Hsla::from(theme.editor.ctl));
-        let frame = match (&image, busy) {
-            (Some(image), false) => frame
-                .cursor_pointer()
-                .child(
-                    img(image.clone())
-                        .size_full()
-                        .rounded(px(10.))
-                        .object_fit(gpui::ObjectFit::Cover),
-                )
-                .tooltip(move |_, cx| {
-                    ui::Tooltip::new(&theme, tr::editor::assistant::cover_settings()).view(cx)
-                })
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.close_assistant(window, cx);
-                    this.focus_title_card(cap_project::TitleCardRole::Intro, cx);
-                    cx.notify();
-                })),
-            _ => frame
+        let frame = if picking {
+            // Two finished covers side by side: a click uses that one.
+            let count = state.candidates.len();
+            div()
+                .id("assistant-cover-candidates")
                 .flex()
                 .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(8.))
-                .when(busy, |frame| {
-                    frame
-                        .child(
-                            ui::CircularProgress::new(
-                                px(16.),
-                                px(1.5),
-                                Hsla::from(theme.editor.line),
-                                Hsla::from(theme.editor.text_2),
-                            )
-                            .indeterminate(),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(Hsla::from(theme.editor.text_2))
-                                .child(tr::editor::assistant::cover_working()),
-                        )
-                })
-                .when(!busy, |frame| {
-                    frame.child(
-                        gpui::svg()
-                            .path("icons/image-off.svg")
-                            .size(px(18.))
-                            .text_color(Hsla::from(theme.editor.text_3)),
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(Hsla::from(theme.editor.text_2))
+                        .child(tr::editor::assistant::cover_pick()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.))
+                        .children(state.candidates.iter().enumerate().map(
+                            |(index, (_, preview))| {
+                                div()
+                                    .id(("assistant-cover-candidate", index))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(px(if count > 1 { 96. } else { 168. }))
+                                    .rounded(px(8.))
+                                    .overflow_hidden()
+                                    .cursor_pointer()
+                                    .bg(Hsla::from(theme.editor.ctl))
+                                    .border_1()
+                                    .border_color(Hsla::from(theme.editor.line))
+                                    .hover(|style| {
+                                        style.border_color(Hsla::from(theme.editor.text_2))
+                                    })
+                                    .child(
+                                        img(preview.clone())
+                                            .size_full()
+                                            .object_fit(gpui::ObjectFit::Cover),
+                                    )
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.pick_cover_candidate(index, window, cx)
+                                    }))
+                            },
+                        )),
+                )
+        } else {
+            let frame = frame;
+            match (&image, busy) {
+                (Some(image), false) => frame
+                    .cursor_pointer()
+                    .child(
+                        img(image.clone())
+                            .size_full()
+                            .rounded(px(10.))
+                            .object_fit(gpui::ObjectFit::Cover),
                     )
-                }),
+                    .tooltip(move |_, cx| {
+                        ui::Tooltip::new(&theme, tr::editor::assistant::cover_settings()).view(cx)
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_assistant(window, cx);
+                        this.focus_title_card(cap_project::TitleCardRole::Intro, cx);
+                        cx.notify();
+                    })),
+                _ => frame
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.))
+                    .when(busy, |frame| {
+                        frame
+                            .child(
+                                ui::CircularProgress::new(
+                                    px(16.),
+                                    px(1.5),
+                                    Hsla::from(theme.editor.line),
+                                    Hsla::from(theme.editor.text_2),
+                                )
+                                .indeterminate(),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(Hsla::from(theme.editor.text_2))
+                                    .child(tr::editor::assistant::cover_working()),
+                            )
+                    })
+                    .when(!busy, |frame| {
+                        frame.child(
+                            gpui::svg()
+                                .path("icons/image-off.svg")
+                                .size(px(18.))
+                                .text_color(Hsla::from(theme.editor.text_3)),
+                        )
+                    }),
+            }
         };
         let mut card = div().flex().flex_col().gap(px(8.)).child(frame);
         if let Some(error) = &state.error {
@@ -774,10 +900,7 @@ impl EditorWindow {
                                 .tooltip(&theme, tr::editor::assistant::cover_settings())
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.close_assistant(window, cx);
-                                    this.focus_title_card(
-                                        cap_project::TitleCardRole::Intro,
-                                        cx,
-                                    );
+                                    this.focus_title_card(cap_project::TitleCardRole::Intro, cx);
                                     cx.notify();
                                 })),
                         )

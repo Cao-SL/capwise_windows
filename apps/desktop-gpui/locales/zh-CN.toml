@@ -3736,6 +3736,8 @@ project_changed = "准备导出时项目发生了变化，请重新导出以使�
 [editor.title_cards]
 subject = "人物"
 subject_none = "无"
+subject_privacy = "生成封面时，人物照片会发送给豆包 Seedream 作参考。"
+finished_note = "标题和人物已画在封面图里。改了标题或人物后，请重新生成封面。"
 subject_upload = "上传我的照片"
 subject_left = "左侧"
 subject_right = "右侧"
@@ -4093,6 +4095,7 @@ captions = "字幕"
 visible = "显示"
 hidden = "隐藏"
 cover_settings = "编辑封面"
+cover_pick = "选一张作为封面"
 cover_working = "正在生成封面…"
 regenerate = "换一张"
 

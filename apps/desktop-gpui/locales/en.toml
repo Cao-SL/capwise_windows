@@ -3738,6 +3738,8 @@ project_changed = "The project changed while preparing the export. Start export 
 [editor.title_cards]
 subject = "Person"
 subject_none = "None"
+subject_privacy = "When a cover is generated, the person photo is sent to Doubao Seedream as a reference."
+finished_note = "The title and person are painted into the cover image. After changing either, generate the cover again."
 subject_upload = "Add my photos"
 subject_left = "Left"
 subject_right = "Right"
@@ -4095,6 +4097,7 @@ captions = "Captions"
 visible = "Show"
 hidden = "Hide"
 cover_settings = "Edit cover"
+cover_pick = "Pick one for the cover"
 cover_working = "Making the cover…"
 regenerate = "Make another"
 
