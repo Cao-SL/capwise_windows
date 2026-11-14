@@ -44,6 +44,7 @@ fn hold_label(seconds: f64) -> String {
 pub(crate) struct TitleCardUi {
     pub(crate) cover: crate::editor_cover::CoverUi,
     pub(crate) library: crate::editor_title_card_presets::TitleCardLibraryUi,
+    pub(crate) subject: crate::editor_title_card_subject::SubjectUi,
     pub(crate) error: Option<String>,
     pub(crate) picking_image: bool,
     pub(crate) applying: bool,
@@ -1118,6 +1119,9 @@ impl EditorWindow {
                         })),
                 ),
             )
+            .when(role == TitleCardRole::Intro, |this| {
+                this.child(self.render_title_card_subject(index, card.subject.as_ref(), cx))
+            })
             .child(
                 ui::Field::stacked(&theme, tr::editor::title_cards::duration())
                     .child(self.render_title_card_hold(index, segment.end - segment.start, cx)),

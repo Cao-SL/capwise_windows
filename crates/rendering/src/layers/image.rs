@@ -808,6 +808,77 @@ impl ImageLayer {
         !self.draws.is_empty()
     }
 
+    pub(super) async fn prepare_title_card_subject(
+        &mut self,
+        constants: &RenderVideoConstants,
+        relative: &str,
+        region: [f32; 4],
+        side: cap_project::TitleCardSubjectSide,
+        mirror: bool,
+    ) -> Result<(), crate::RenderingError> {
+        self.draws.clear();
+        self.draw_tracks.clear();
+        let texture = self.project_texture(constants, relative).await?;
+        let bounds = crate::title_cards::subject_placement(
+            (texture.width(), texture.height()),
+            region,
+            side,
+        )
+        .ok_or_else(|| crate::RenderingError::TitleCard("Invalid subject framing".into()))?;
+        self.push_draw_with_track(
+            &constants.device,
+            &texture,
+            ImageUniforms {
+                center_size: [
+                    (bounds[0] + bounds[2]) * 0.5,
+                    (bounds[1] + bounds[3]) * 0.5,
+                    bounds[2] - bounds[0],
+                    bounds[3] - bounds[1],
+                ],
+                rotation_opacity_radius: [1.0, 0.0, 1.0, 0.0],
+                flips: [if mirror { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                uv_rect: [0.0, 0.0, 1.0, 1.0],
+            },
+            0,
+        );
+        self.cached_draws.truncate(1);
+        Ok(())
+    }
+
+    async fn project_texture(
+        &mut self,
+        constants: &RenderVideoConstants,
+        relative: &str,
+    ) -> Result<wgpu::Texture, crate::RenderingError> {
+        let project = constants.recording_meta.project_path.clone();
+        let relative = relative.to_owned();
+        let (path, version) = tokio::task::spawn_blocking(move || {
+            let root = project.canonicalize().ok()?;
+            let path = root.join(relative).canonicalize().ok()?;
+            if !path.starts_with(&root) || !path.is_file() {
+                return None;
+            }
+            let version = FileVersion::read(&path);
+            Some((path, version))
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            crate::RenderingError::ImageLoadError(
+                "Title card image is missing or outside the project".into(),
+            )
+        })?;
+        self.cache.retain(|cached, _| cached == &path);
+        self.ensure_texture(&constants.device, &constants.queue, &path, &version, None)
+            .await
+            .ok_or_else(|| {
+                crate::RenderingError::ImageLoadError(
+                    "Title card image could not be decoded".into(),
+                )
+            })
+    }
+
     pub(super) async fn prepare_title_card_picture(
         &mut self,
         constants: &RenderVideoConstants,

@@ -3736,6 +3736,15 @@ not_started = "Caption processing did not start. Check its settings or export th
 project_changed = "The project changed while preparing the export. Start export again to use the latest version."
 
 [editor.title_cards]
+subject = "Person"
+subject_none = "None"
+subject_upload = "Add my photos"
+subject_left = "Left"
+subject_right = "Right"
+subject_busy = "Adding…"
+subject_mine = "Me"
+subject_imported = "Added {count} photos to Me."
+subject_kept = "{count} photos were kept for later: cutting a person out of a photo needs macOS 14 or later."
 export_cover = "Export cover PNG"
 export_image = "Export image PNG"
 exporting = "Exporting PNG…"

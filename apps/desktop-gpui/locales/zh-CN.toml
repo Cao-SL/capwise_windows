@@ -3734,6 +3734,15 @@ not_started = "字幕处理尚未启动。请检查相关设置，或按当前�
 project_changed = "准备导出时项目发生了变化，请重新导出以使用最新版本。"
 
 [editor.title_cards]
+subject = "人物"
+subject_none = "无"
+subject_upload = "上传我的照片"
+subject_left = "左侧"
+subject_right = "右侧"
+subject_busy = "正在添加…"
+subject_mine = "我的形象"
+subject_imported = "已把 {count} 张照片加入“我的形象”。"
+subject_kept = "{count} 张照片已保存备用：从照片里抠出人物需要 macOS 14 或更高版本。"
 export_cover = "导出封面 PNG"
 export_image = "导出图片 PNG"
 exporting = "正在导出 PNG…"

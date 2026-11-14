@@ -12,6 +12,7 @@ use crate::{
 pub(crate) struct TitleCardLayer {
     text: TextLayer,
     image: ImageLayer,
+    subject: ImageLayer,
     background: TextBackgroundResources,
     prepared: Option<(TextSegment, (u32, u32), bool)>,
     text_box: Option<crate::TitleTextFrameBox>,
@@ -24,6 +25,7 @@ impl TitleCardLayer {
         Self {
             text: TextLayer::new(device, queue),
             image: ImageLayer::new(device),
+            subject: ImageLayer::new(device),
             background: TextBackgroundResources::new(device),
             prepared: None,
             text_box: None,
@@ -89,6 +91,21 @@ impl TitleCardLayer {
                 .await?;
         } else {
             self.image.clear_title_card_picture();
+        }
+
+        match (&card.subject, layout.subject) {
+            (Some(subject), Some((region, side))) => {
+                self.subject
+                    .prepare_title_card_subject(
+                        constants,
+                        &subject.path,
+                        region,
+                        side,
+                        subject.mirror,
+                    )
+                    .await?;
+            }
+            _ => self.subject.clear_title_card_picture(),
         }
 
         if self
@@ -314,6 +331,7 @@ impl TitleCardLayer {
         }
         self.background.render(pass, 0);
         self.image.render(pass);
+        self.subject.render(pass);
         if self.accent {
             self.background.render(pass, 1);
         }
