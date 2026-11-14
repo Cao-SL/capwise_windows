@@ -522,6 +522,16 @@ impl EditorWindow {
                             // The user picks one; picking applies it and
                             // undo takes it back out.
                             state.candidates = candidates;
+                            // `CAP_GPUI_AUTO_COVER_PICK=<n>`: pick candidate n
+                            // the way a click does (synthetic clicks are
+                            // dropped).
+                            #[cfg(debug_assertions)]
+                            if let Some(index) = std::env::var("CAP_GPUI_AUTO_COVER_PICK")
+                                .ok()
+                                .and_then(|value| value.parse::<usize>().ok())
+                            {
+                                this.pick_cover_candidate(index, window, cx);
+                            }
                         }
                         Ok(_) => {}
                         Err(error) => state.error = Some(error_message(error)),
