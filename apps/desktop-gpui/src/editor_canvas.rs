@@ -1415,6 +1415,11 @@ impl EditorWindow {
                     .get(index)?
                     .resolved_at(self.preview_or_playhead());
                 let segment = segment.as_ref();
+                // A finished cover has its title painted in: there is no text
+                // box on the canvas to select, drag or type into.
+                if segment.title_card.as_ref().is_some_and(|card| card.hide_title) {
+                    return None;
+                }
                 if segment.title_card.is_some() {
                     let layout = self.frame_layout.as_ref()?;
                     let bounds = cap_rendering::title_card_text_bounds(
