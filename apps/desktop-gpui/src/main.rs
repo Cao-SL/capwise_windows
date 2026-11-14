@@ -165,6 +165,8 @@ mod transcript;
 mod transcription;
 mod tray;
 mod ui;
+#[cfg(target_os = "macos")]
+mod update_delta;
 mod updates;
 #[cfg(feature = "cap-cloud")]
 mod upload;

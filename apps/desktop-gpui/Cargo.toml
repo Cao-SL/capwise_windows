@@ -253,6 +253,7 @@ raw-window-handle = "0.6"
 x11rb = "0.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+zstd = "0.13"
 # Cloud recognition API keys live in the login keychain.
 security-framework = "3"
 # Native window treatment (panel levels, Spaces) gpui does not expose. Same

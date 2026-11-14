@@ -13,6 +13,8 @@
 #   CAPWISE_SIGN_IDENTITY         Developer ID Application identity (default: first in the keychain)
 #   CAPWISE_NOTARY_PROFILE        notarytool keychain profile (default: capwise-notary)
 #   CAPWISE_UPDATER_KEY           minisign secret key file (default: ~/.config/capwise/updater.key)
+#   CAPWISE_DELTA_FROM            versions to build update patches from (default: the
+#                                 last 3 published releases; "none" skips patches)
 #   CAPWISE_UPDATER_KEY_PASSWORD  its password; otherwise read from the keychain item
 #                                 "capwise-updater-key", otherwise minisign asks
 #   CAPWISE_RELEASE_NOTES         Markdown file whose text goes into latest.json
@@ -96,6 +98,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is missing ($2)"; }
 need minisign "brew install minisign"
 need python3 "install Xcode command line tools"
 need cargo "install rustup"
+need zstd "brew install zstd"
 
 step "Preflight"
 IDENTITY="${CAPWISE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)}"
@@ -164,7 +167,7 @@ VERSION="$VERSION" perl -0pi -e \
 if ! ((SKIP_BUILD)); then
   step "Release build"
   (cd "$HERE" && cargo build --release --locked --bin cap-gpui)
-  (cd "$ROOT" && cargo build --release --locked -p cap)
+  (cd "$ROOT" && CARGO_PROFILE_RELEASE_STRIP=symbols cargo build --release --locked -p cap)
 fi
 step "Assemble $APP_NAME.app"
 mkdir -p "$WORK" "$DIST"
@@ -270,6 +273,48 @@ sign_update "$ARCHIVE"
 echo "$ARCHIVE_NAME signed and verified against $(basename "$PUBLIC_KEY")"
 if ((APP_ONLY)); then exit 0; fi
 
+step "Update patches"
+DELTAS_JSON="$WORK/deltas.json"
+echo '{}' >"$DELTAS_JSON"
+DELTA_FILES=()
+delta_from="${CAPWISE_DELTA_FROM:-}"
+if [[ -z "$delta_from" ]] && command -v gh >/dev/null 2>&1; then
+  delta_from="$(gh release list --repo "$REPO" --exclude-drafts --exclude-pre-releases --limit 10 \
+    --json tagName --jq '.[].tagName' | sed 's/^v//' | grep -vx "$VERSION" | head -3 | tr '\n' ' ' || true)"
+fi
+[[ "$delta_from" == "none" ]] && delta_from=""
+for previous in $delta_from; do
+  previous="${previous#v}"
+  name="${APP_NAME}_${previous}_${ARCH}.app.tar.gz"
+  base="$WORK/delta-base/$previous"
+  rm -rf "$base"
+  mkdir -p "$base"
+  if ! gh release download "v$previous" --repo "$REPO" --pattern "$name" --pattern "$name.minisig" \
+    --dir "$base" >/dev/null 2>&1; then
+    echo "No $name to patch from; skipping $previous."
+    continue
+  fi
+  minisign -V -q -p "$HERE/packaging/updater.pub" -m "$base/$name" -x "$base/$name.minisig" ||
+    die "the published $name is not signed with packaging/updater.pub"
+  tar -xzf "$base/$name" -C "$base"
+  delta_name="${APP_NAME}_${previous}_to_${VERSION}_${ARCH}.delta"
+  python3 "$HERE/scripts/make-update-delta.py" "$base/$APP_NAME.app" "$STAGE" "$previous" "$VERSION" \
+    "$DIST/$delta_name"
+  sign_update "$DIST/$delta_name"
+  DELTA_FILES+=("$DIST/$delta_name" "$DIST/$delta_name.minisig")
+  python3 -c '
+import json, sys
+path, previous, url, signature = sys.argv[1:]
+with open(path) as handle:
+    deltas = json.load(handle)
+deltas[previous] = {"url": url, "signature": signature}
+with open(path, "w") as handle:
+    json.dump(deltas, handle)
+' "$DELTAS_JSON" "$previous" "https://github.com/$REPO/releases/download/$TAG/$delta_name" \
+    "$(base64 -i "$DIST/$delta_name.minisig" | tr -d '\n')"
+  rm -rf "$base"
+done
+
 step "DMG"
 DMG_TOOLS="$HERE/target/release-tools"
 if [[ ! -x "$DMG_TOOLS/bin/dmgbuild" ]]; then
@@ -359,10 +404,13 @@ if [[ -n "${CAPWISE_RELEASE_NOTES:-}" ]]; then
   notes="$(cat "$CAPWISE_RELEASE_NOTES")"
 fi
 CAPWISE_NOTES="$notes" python3 - "$DIST/latest.json" "$VERSION" "$PLATFORM" \
-  "https://github.com/$REPO/releases/download/$TAG/$ARCHIVE_NAME" "$(base64 -i "$ARCHIVE.minisig" | tr -d '\n')" <<'PY'
+  "https://github.com/$REPO/releases/download/$TAG/$ARCHIVE_NAME" "$(base64 -i "$ARCHIVE.minisig" | tr -d '\n')" \
+  "$DELTAS_JSON" <<'PY'
 import datetime, json, os, sys
 
-path, version, platform, url, signature = sys.argv[1:]
+path, version, platform, url, signature, deltas_path = sys.argv[1:]
+with open(deltas_path) as handle:
+    deltas = json.load(handle)
 manifest = {
     "version": version,
     "notes": os.environ.get("CAPWISE_NOTES", ""),
@@ -375,6 +423,8 @@ if os.path.exists(path):
     if previous.get("version") == version:
         manifest["platforms"] = previous.get("platforms", {})
 manifest["platforms"][platform] = {"url": url, "signature": signature}
+if deltas:
+    manifest["platforms"][platform]["deltas"] = deltas
 with open(path, "w") as out:
     json.dump(manifest, out, indent=2, ensure_ascii=False)
     out.write("\n")
@@ -383,7 +433,7 @@ PY
 if [[ "$ARCH" == "aarch64" ]]; then
   cp "$DMG" "$DIST/$APP_NAME.dmg"
 fi
-(cd "$DIST" && shasum -a 256 ./*.dmg ./*.app.tar.gz >SHA256SUMS.txt)
+(cd "$DIST" && shasum -a 256 ./*.dmg ./*.app.tar.gz $(ls ./*.delta 2>/dev/null) >SHA256SUMS.txt)
 
 step "Done"
 ls -lh "$DIST"
@@ -395,6 +445,6 @@ else
 
 Nothing has been uploaded. To publish (after committing the version bump and tagging $TAG):
   gh release create $TAG --repo $REPO --title "灵录 Capwise $VERSION" --notes-file <notes.md> \\
-    "$DIST"/*.dmg "$ARCHIVE" "$ARCHIVE.minisig" "$DIST/latest.json" "$DIST/SHA256SUMS.txt"
+    "$DIST"/*.dmg "$ARCHIVE" "$ARCHIVE.minisig" ${DELTA_FILES[*]:-} "$DIST/latest.json" "$DIST/SHA256SUMS.txt"
 EOF
 fi
