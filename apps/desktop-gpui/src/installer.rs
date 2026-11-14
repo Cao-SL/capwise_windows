@@ -98,7 +98,6 @@ struct RemoteAsset {
     deltas: HashMap<String, RemoteDelta>,
 }
 
-/// A patch from one earlier version to this one, keyed by that version.
 #[derive(Deserialize)]
 struct RemoteDelta {
     url: String,
@@ -130,6 +129,7 @@ pub(crate) struct Release {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct Delta {
     pub(crate) from: Version,
     pub(crate) url: String,
@@ -393,6 +393,7 @@ async fn download_into(
     let _ = running;
     #[cfg(target_os = "macos")]
     if kind == ArtifactKind::AppArchive
+        && !version_dir.join(SKIP_DELTA_MARKER).exists()
         && let Some((bundle, current)) = running
         && let Some(delta) = release.deltas.iter().find(|delta| delta.from == current)
     {
@@ -453,6 +454,34 @@ async fn download_delta(
 
 #[cfg(target_os = "macos")]
 const DELTA_APP_NAME: &str = "Capwise.app";
+#[cfg(target_os = "macos")]
+const SKIP_DELTA_MARKER: &str = "skip-delta";
+
+/// A bundle rebuilt from a patch that then failed to install is thrown away
+/// with its patch, and this version downloads the full archive from now on,
+/// so a bad patch can never leave the update stuck.
+#[cfg(target_os = "macos")]
+pub(crate) fn discard_patched_update(package: &Path) {
+    if package.file_name() != Some(std::ffi::OsStr::new(DELTA_APP_NAME)) {
+        return;
+    }
+    let Some(version_dir) = package.parent() else {
+        return;
+    };
+    let _ = std::fs::remove_dir_all(package);
+    if let Ok(entries) = std::fs::read_dir(version_dir) {
+        for entry in entries.flatten() {
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "delta")
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let _ = std::fs::write(version_dir.join(SKIP_DELTA_MARKER), b"");
+}
 
 #[cfg(target_os = "macos")]
 fn check_rebuilt_app(app: &Path, installed: &Path) -> Result<(), String> {
@@ -1464,6 +1493,189 @@ mod tests {
         let version_dir = root.join("capwise/9.9.9");
         assert!(!version_dir.join("Capwise-from-9.9.8.delta").exists());
         assert!(!version_dir.join("Capwise.app").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_patched_bundle_that_failed_to_install_is_never_patched_again() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let root = scratch("delta-discard");
+        let version_dir = root.join("capwise/9.9.9");
+        std::fs::create_dir_all(version_dir.join("Capwise.app/Contents")).unwrap();
+        std::fs::write(version_dir.join("Capwise-from-9.9.8.delta"), b"patch").unwrap();
+        discard_patched_update(&version_dir.join("Capwise.app"));
+        assert!(!version_dir.join("Capwise.app").exists());
+        assert!(!version_dir.join("Capwise-from-9.9.8.delta").exists());
+
+        let installed = root.join("Installed.app");
+        std::fs::create_dir_all(installed.join("Contents")).unwrap();
+        let (url, server) = serve_script(vec![(
+            None,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest".to_vec(),
+        )]);
+        let mut update = release(url.clone());
+        update.deltas = vec![Delta {
+            from: Version::new(9, 9, 8),
+            url,
+            signature: encode(TEST_SIGNATURE),
+        }];
+        let downloaded = runtime
+            .block_on(download_into(
+                &root,
+                TEST_KEY,
+                ArtifactKind::AppArchive,
+                &update,
+                Some((installed, Version::new(9, 9, 8))),
+                &mut |_, _| {},
+            ))
+            .unwrap();
+        assert_eq!(server.join().unwrap(), 1);
+        assert_eq!(downloaded, version_dir.join("Capwise.app.tar.gz"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn bundle_tree(bundle: &Path) -> Vec<u8> {
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("find . -print0 | sort -z | xargs -0 stat -f '%N %p %z %Y' && find . -type f -print0 | sort -z | xargs -0 shasum -a 256")
+            .current_dir(bundle)
+            .output()
+            .unwrap()
+            .stdout
+    }
+
+    /// The whole patch path on two shipped releases: download through the
+    /// updater, rebuild, then the same swap a full archive gets.
+    /// CAPWISE_DELTA_OLD, CAPWISE_DELTA_NEW, CAPWISE_DELTA_FILE,
+    /// CAPWISE_DELTA_VERSIONS=<from>:<to>, plus CAPWISE_DELTA_PUBLIC_KEY and
+    /// CAPWISE_DELTA_SIGNATURE (a throwaway minisign pair over the patch).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs two extracted releases and a signed patch"]
+    fn real_release_patch_downloads_rebuilds_and_installs() {
+        let var = |name| PathBuf::from(std::env::var_os(name).expect(name));
+        let versions = std::env::var("CAPWISE_DELTA_VERSIONS").unwrap();
+        let (from, to) = versions.split_once(':').unwrap();
+        let (from, to) = (Version::parse(from).unwrap(), Version::parse(to).unwrap());
+        let public_key = std::fs::read_to_string(var("CAPWISE_DELTA_PUBLIC_KEY")).unwrap();
+        let signature = encode(&std::fs::read_to_string(var("CAPWISE_DELTA_SIGNATURE")).unwrap());
+        let patch = std::fs::read(var("CAPWISE_DELTA_FILE")).unwrap();
+
+        let root = scratch("real-install");
+        let installed = root.join("Applications/Capwise.app");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        assert!(
+            std::process::Command::new("/usr/bin/ditto")
+                .arg(var("CAPWISE_DELTA_OLD"))
+                .arg(&installed)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            patch.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&patch);
+        let (url, server) = serve_script(vec![(None, response)]);
+        let update = Release {
+            version: to.clone(),
+            url: "http://127.0.0.1:9/never-fetched".to_string(),
+            signature: signature.clone(),
+            notes: None,
+            deltas: vec![Delta {
+                from: from.clone(),
+                url,
+                signature,
+            }],
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let package = runtime
+            .block_on(download_into(
+                &root.join("cache"),
+                &public_key,
+                ArtifactKind::AppArchive,
+                &update,
+                Some((installed.clone(), from)),
+                &mut |_, _| {},
+            ))
+            .unwrap();
+        assert_eq!(server.join().unwrap(), 1);
+        assert!(package.ends_with(format!("{to}/Capwise.app")));
+        check_artifact_kind(&package, ArtifactKind::AppArchive).unwrap();
+
+        let applications = root.join("Applications");
+        let result = install_app_bundle_in(&package, &installed, &applications).unwrap();
+        assert_eq!(result, installed);
+        assert!(!package.exists());
+        assert!(
+            bundle_tree(&installed) == bundle_tree(&var("CAPWISE_DELTA_NEW")),
+            "the installed bundle differs from the release"
+        );
+        for args in [
+            vec!["/usr/bin/codesign", "--verify", "--deep", "--strict"],
+            vec!["/usr/sbin/spctl", "--assess", "--type", "execute"],
+            vec!["/usr/bin/xcrun", "stapler", "validate"],
+        ] {
+            let status = std::process::Command::new(args[0])
+                .args(&args[1..])
+                .arg(&installed)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{args:?} rejected the installed app");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Resumes a real GitHub download: CAPWISE_RESUME_FROM=<the published
+    /// archive for this Mac's latest release>.
+    #[test]
+    #[ignore = "downloads from GitHub"]
+    fn a_real_github_download_resumes_mid_file() {
+        let local = PathBuf::from(std::env::var_os("CAPWISE_RESUME_FROM").unwrap());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut update = runtime.block_on(fetch_release()).unwrap().unwrap();
+        update.deltas.clear();
+        let bytes = std::fs::read(&local).unwrap();
+        let prefilled = bytes.len() as u64 - 5 * 1024 * 1024;
+        let root = scratch("github-resume");
+        let version_dir = root.join("capwise").join(update.version.to_string());
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("Capwise.app.tar.gz.partial"),
+            &bytes[..prefilled as usize],
+        )
+        .unwrap();
+        let mut first = None;
+        let downloaded = runtime
+            .block_on(download_into(
+                &root,
+                UPDATER_PUBLIC_KEY,
+                ArtifactKind::AppArchive,
+                &update,
+                None,
+                &mut |done, total| {
+                    first.get_or_insert((done, total));
+                },
+            ))
+            .unwrap();
+        assert_eq!(first, Some((prefilled, Some(bytes.len() as u64))));
+        assert_eq!(std::fs::read(&downloaded).unwrap(), bytes);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -98,7 +98,6 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is missing ($2)"; }
 need minisign "brew install minisign"
 need python3 "install Xcode command line tools"
 need cargo "install rustup"
-need zstd "brew install zstd"
 
 step "Preflight"
 IDENTITY="${CAPWISE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)}"
@@ -274,6 +273,7 @@ echo "$ARCHIVE_NAME signed and verified against $(basename "$PUBLIC_KEY")"
 if ((APP_ONLY)); then exit 0; fi
 
 step "Update patches"
+need zstd "brew install zstd"
 DELTAS_JSON="$WORK/deltas.json"
 echo '{}' >"$DELTAS_JSON"
 DELTA_FILES=()
@@ -290,8 +290,8 @@ for previous in $delta_from; do
   rm -rf "$base"
   mkdir -p "$base"
   if ! gh release download "v$previous" --repo "$REPO" --pattern "$name" --pattern "$name.minisig" \
-    --dir "$base" >/dev/null 2>&1; then
-    echo "No $name to patch from; skipping $previous."
+    --dir "$base" >/dev/null 2>&1 || [[ ! -f "$base/$name.minisig" ]]; then
+    echo "No signed $name to patch from; skipping $previous."
     continue
   fi
   minisign -V -q -p "$HERE/packaging/updater.pub" -m "$base/$name" -x "$base/$name.minisig" ||
