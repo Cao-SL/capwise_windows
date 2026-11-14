@@ -61,6 +61,36 @@ impl Default for TitleCardBackground {
     }
 }
 
+/// Which side of the card a subject cutout (a person, usually) stands on;
+/// the title takes the other side.
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TitleCardSubjectSide {
+    Left,
+    #[default]
+    Right,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TitleCardSubject {
+    pub path: String,
+    #[serde(default)]
+    pub side: TitleCardSubjectSide,
+    #[serde(default)]
+    pub mirror: bool,
+}
+
+fn valid_project_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1024
+        && !path.chars().any(char::is_control)
+        && !path.contains(['\\', ':'])
+        && !path
+            .split('/')
+            .any(|component| matches!(component, "" | "." | ".."))
+}
+
 fn center_focus() -> XY<f64> {
     XY::new(0.5, 0.5)
 }
@@ -86,6 +116,13 @@ pub struct TitleCard {
     pub background: TitleCardBackground,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom_text_layout: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<TitleCardSubject>,
+    /// The background is a finished cover that already carries the title
+    /// and the person, so the card draws neither its own text nor its
+    /// subject cutout.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_title: bool,
 }
 
 impl TitleCard {
@@ -99,6 +136,8 @@ impl TitleCard {
             subtitle: String::new(),
             background: TitleCardBackground::default(),
             custom_text_layout: false,
+            subject: None,
+            hide_title: false,
         }
     }
 
@@ -133,14 +172,7 @@ impl TitleCard {
             TitleCardBackground::ProjectImage {
                 path, focus, dim, ..
             } => {
-                if path.is_empty()
-                    || path.len() > 1024
-                    || path.chars().any(char::is_control)
-                    || path.contains(['\\', ':'])
-                    || path
-                        .split('/')
-                        .any(|component| matches!(component, "" | "." | ".."))
-                {
+                if !valid_project_path(path) {
                     return Err(TitleCardError::InvalidMetadata("background path"));
                 }
                 if !focus.x.is_finite()
@@ -153,6 +185,11 @@ impl TitleCard {
                     return Err(TitleCardError::InvalidMetadata("background framing"));
                 }
             }
+        }
+        if let Some(subject) = &self.subject
+            && !valid_project_path(&subject.path)
+        {
+            return Err(TitleCardError::InvalidMetadata("subject path"));
         }
         Ok(())
     }

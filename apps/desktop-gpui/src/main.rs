@@ -61,6 +61,7 @@ mod editor_sidebar;
 mod editor_tabs;
 mod editor_timeline;
 mod editor_title_card_presets;
+mod editor_title_card_subject;
 mod editor_title_cards;
 mod editor_voiceover;
 mod editor_window;
@@ -101,6 +102,8 @@ mod perf_marks;
 mod permission_guide;
 mod permissions;
 mod permissions_ui;
+mod persona_cutout;
+mod personas;
 #[cfg(test)]
 mod picker_benchmark;
 #[cfg(debug_assertions)]

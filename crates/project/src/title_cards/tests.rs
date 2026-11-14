@@ -371,6 +371,38 @@ fn card_metadata_rejects_unsafe_paths_unbounded_text_and_unknown_versions() {
 }
 
 #[test]
+fn card_subject_is_optional_roundtrips_and_rejects_unsafe_paths() {
+    let segment = card(TitleCardRole::Intro, 2.0);
+    let legacy = value(&segment);
+    assert!(legacy["titleCard"].get("subject").is_none());
+    let reopened: TextSegment = serde_json::from_value(legacy).unwrap();
+    assert_eq!(reopened.title_card.unwrap().subject, None);
+
+    let mut data = value(&segment);
+    data["titleCard"]["subject"] = json!({"path": "content/images/person.png"});
+    let reopened: TextSegment = serde_json::from_value(data).unwrap();
+    assert_eq!(
+        reopened.title_card.as_ref().unwrap().subject,
+        Some(TitleCardSubject {
+            path: "content/images/person.png".into(),
+            side: TitleCardSubjectSide::Right,
+            mirror: false,
+        })
+    );
+    let encoded = value(&reopened);
+    assert_eq!(encoded["titleCard"]["subject"]["side"], json!("right"));
+
+    for path in ["/Users/me/person.png", "../person.png", "a//b.png", ""] {
+        let mut data = value(&segment);
+        data["titleCard"]["subject"] = json!({"path": path, "side": "left", "mirror": true});
+        assert!(
+            serde_json::from_value::<TextSegment>(data).is_err(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn project_roundtrip_preserves_card_identity_background_and_fractional_hold() {
     let mut project = fixture();
     let mut outro = card(TitleCardRole::Outro, 0.1);

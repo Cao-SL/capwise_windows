@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-CAPWISE_ASSET_TREES=(backgrounds music)
+CAPWISE_ASSET_TREES=(backgrounds music personas)
 
 copy_capwise_assets() {
   local source_assets="$1" bundle_assets="$2" tree

@@ -1,4 +1,6 @@
-use cap_project::{TextAlign, TextSegment, TitleCardImageFit, TitleCardTemplate, XY};
+use cap_project::{
+    TextAlign, TextSegment, TitleCardImageFit, TitleCardSubjectSide, TitleCardTemplate, XY,
+};
 
 pub(crate) fn active_title_card<'a>(
     time: f64,
@@ -30,6 +32,7 @@ pub(crate) struct TitleCardLayout {
     pub image: Option<[f32; 4]>,
     pub secondary: Option<[f32; 4]>,
     pub accent: Option<[f32; 4]>,
+    pub subject: Option<([f32; 4], TitleCardSubjectSide)>,
     pub align: TextAlign,
     pub gap: f32,
     pub scale: f32,
@@ -57,6 +60,7 @@ pub(crate) fn title_card_layout(
         image: has_image.then_some(full),
         secondary: None,
         accent: None,
+        subject: None,
         align: TextAlign::Center,
         gap,
         scale,
@@ -133,6 +137,79 @@ fn text_group_bounds(layout: &TitleCardLayout) -> [f32; 4] {
     bounds
 }
 
+/// A subject stands on one side, feet on the bottom edge, and the title moves
+/// to the other side. Portrait cards stack instead: the title on top, the
+/// subject below it. Any background image fills the whole card underneath.
+fn make_room_for_subject(
+    layout: &mut TitleCardLayout,
+    output: (u32, u32),
+    template: TitleCardTemplate,
+    has_image: bool,
+    side: TitleCardSubjectSide,
+) {
+    let width = output.0 as f32;
+    let height = output.1 as f32;
+    let short = width.min(height);
+    let margin = short * 0.085;
+    let gap = short * 0.026;
+    let portrait = height > width * 1.15;
+    layout.image = has_image.then_some([0.0, 0.0, width, height]);
+    layout.secondary = None;
+    layout.align = TextAlign::Left;
+    let region = if portrait {
+        layout.text = [margin, margin * 1.2, width - margin, height * 0.42];
+        [0.0, height * 0.38, width, height]
+    } else {
+        let split = width * 0.5;
+        match side {
+            TitleCardSubjectSide::Right => {
+                layout.text = [margin, height * 0.16, split - gap, height * 0.84];
+                [split, height * 0.04, width, height]
+            }
+            TitleCardSubjectSide::Left => {
+                layout.text = [split + gap, height * 0.16, width - margin, height * 0.84];
+                [0.0, height * 0.04, split, height]
+            }
+        }
+    };
+    layout.accent = matches!(template, TitleCardTemplate::Editorial).then(|| {
+        let top = layout.text[1] - short * 0.06;
+        [
+            layout.text[0],
+            top,
+            layout.text[0] + short * 0.095,
+            top + short * 0.005,
+        ]
+    });
+    layout.subject = Some((region, side));
+}
+
+/// Where a subject cutout of `source` pixels lands inside `region`: as large
+/// as fits, standing on the region's bottom edge, against its outer side.
+pub(crate) fn subject_placement(
+    source: (u32, u32),
+    region: [f32; 4],
+    side: TitleCardSubjectSide,
+) -> Option<[f32; 4]> {
+    let width = region[2] - region[0];
+    let height = region[3] - region[1];
+    if source.0 == 0
+        || source.1 == 0
+        || region.iter().any(|value| !value.is_finite())
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return None;
+    }
+    let scale = (width / source.0 as f32).min(height / source.1 as f32);
+    let fitted = (source.0 as f32 * scale, source.1 as f32 * scale);
+    let left = match side {
+        TitleCardSubjectSide::Right => region[2] - fitted.0,
+        TitleCardSubjectSide::Left => region[0],
+    };
+    Some([left, region[3] - fitted.1, left + fitted.0, region[3]])
+}
+
 pub(crate) fn segment_title_card_layout(
     output: (u32, u32),
     segment: &TextSegment,
@@ -143,6 +220,9 @@ pub(crate) fn segment_title_card_layout(
         cap_project::TitleCardBackground::ProjectImage { .. }
     );
     let mut layout = title_card_layout(output, card.template, has_image)?;
+    if let Some(subject) = &card.subject {
+        make_room_for_subject(&mut layout, output, card.template, has_image, subject.side);
+    }
     if !card.custom_text_layout {
         return Some(layout);
     }
