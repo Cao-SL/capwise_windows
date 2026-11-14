@@ -50,6 +50,10 @@ pub(crate) struct CoverUi {
     /// The request painted the title (and the person) into the image, so the
     /// card stops drawing its own.
     finished: bool,
+    /// Candidates still on their way, and when the request started.
+    pending: usize,
+    started: Option<std::time::Instant>,
+    ticker: Option<gpui::Task<()>>,
     /// The last applied image, kept for the assistant's result card after the
     /// generation state is cleared.
     shown: Option<Arc<RenderImage>>,
@@ -325,6 +329,8 @@ impl EditorWindow {
         state.generation = state.generation.wrapping_add(1);
         state.task = None;
         state.busy = false;
+        state.pending = 0;
+        state.started = None;
         state.open = false;
         state.candidates.clear();
         if state.save_pending.is_none() {
@@ -338,6 +344,20 @@ impl EditorWindow {
 
     pub(crate) fn generate_cover_background(
         &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_cover_candidates(false, window, cx);
+    }
+
+    /// Two more candidates under the ones on offer.
+    fn more_cover_candidates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_cover_candidates(true, window, cx);
+    }
+
+    fn request_cover_candidates(
+        &mut self,
+        more: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -432,13 +452,21 @@ impl EditorWindow {
         state.client = Some(client.clone());
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
-        let ticket = state.scope.begin(context.clone());
+        // More candidates keep the ones on offer pickable; a new request
+        // replaces them.
+        let more = more && !state.candidates.is_empty() && state.context.as_ref() == Some(&context);
+        let ticket = match more.then(|| state.scope.more(context.clone())).flatten() {
+            Some(ticket) => ticket,
+            None => {
+                state.candidates.clear();
+                state.scope.begin(context.clone())
+            }
+        };
         state.context = Some(context.clone());
         state.busy = true;
         state.error = None;
         state.result = None;
         state.preview = None;
-        state.candidates.clear();
         state.finished = title.is_some();
         state.saved = false;
         let mut request = BackgroundRequest {
@@ -453,8 +481,29 @@ impl EditorWindow {
             title,
             reference: None,
         };
+        state.pending = cover_generation::COVER_CANDIDATES;
+        state.started = Some(std::time::Instant::now());
+        // Tick the elapsed seconds while waiting.
+        state.ticker = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let waiting = this
+                    .update(cx, |this, cx| {
+                        cx.notify();
+                        this.sidebar.title_cards.cover.pending > 0
+                    })
+                    .unwrap_or(false);
+                if !waiting {
+                    return;
+                }
+            }
+        }));
         state.task = Some(cx.spawn_in(window, async move |this, cx| {
-            let Ok(task) = cx.update(|_, cx| {
+            // The key and the reference photo once, then every candidate on
+            // its own request, so each shows the moment it is ready.
+            let Ok(setup) = cx.update(|_, cx| {
                 gpui_tokio::Tokio::spawn(cx, async move {
                     let key = tokio::task::spawn_blocking(move || {
                         ai_store::key(Kind::Image, provider.id())
@@ -475,74 +524,138 @@ impl EditorWindow {
                         .flatten()
                         .map(Arc::new);
                     }
-                    let results = client
-                        .generate_candidates(
-                            &key,
-                            request,
-                            cover_generation::COVER_CANDIDATES,
-                            ticket,
-                        )
-                        .await?;
-                    let permit = cover_generation::image_decode_permit().await?;
-                    tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        results
-                            .into_iter()
-                            .map(|result| {
-                                let preview = thumbnail(&result.bytes)?;
-                                Ok::<_, GenerationError>((Arc::new(result), preview))
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .await
-                    .map_err(|_| GenerationError::InvalidImage)?
+                    Ok::<_, GenerationError>((key, request))
                 })
             }) else {
                 return;
             };
-            let result = task.await.unwrap_or(Err(GenerationError::Cancelled));
-            this.update_in(cx, |this, window, cx| {
-                if this.sidebar.title_cards.cover.generation != generation {
+            let setup = setup.await.unwrap_or(Err(GenerationError::Cancelled));
+            let (key, request) = match setup {
+                Ok(setup) => setup,
+                Err(error) => {
+                    this.update_in(cx, |this, window, cx| {
+                        this.sidebar.title_cards.cover.pending = 1;
+                        this.finish_cover_candidate(
+                            generation,
+                            &target,
+                            &context,
+                            Err(error),
+                            window,
+                            cx,
+                        )
+                    })
+                    .ok();
                     return;
                 }
-                let current = this.cover_context(&target);
-                let state = &mut this.sidebar.title_cards.cover;
-                state.busy = false;
-                state.task = None;
-                if current.as_ref() != Some(&context) {
-                    state.scope.cancel();
-                    state.error = Some(tr::editor::cover::changed().into());
-                } else {
-                    match result {
-                        Ok(candidates)
-                            if candidates
-                                .iter()
-                                .all(|(result, _)| state.scope.accepts(result, &context)) =>
-                        {
-                            // The user picks one; picking applies it and
-                            // undo takes it back out.
-                            state.candidates = candidates;
-                            // `CAP_GPUI_AUTO_COVER_PICK=<n>`: pick candidate n
-                            // the way a click does (synthetic clicks are
-                            // dropped).
-                            #[cfg(debug_assertions)]
-                            if let Some(index) = std::env::var("CAP_GPUI_AUTO_COVER_PICK")
-                                .ok()
-                                .and_then(|value| value.parse::<usize>().ok())
-                            {
-                                this.pick_cover_candidate(index, window, cx);
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(error) => state.error = Some(error_message(error)),
-                    }
+            };
+            let mut requests = futures_util::stream::FuturesUnordered::new();
+            for _ in 0..cover_generation::COVER_CANDIDATES {
+                let client = client.clone();
+                let key = key.clone();
+                let request = request.clone();
+                let ticket = ticket.clone();
+                let Ok(task) = cx.update(|_, cx| {
+                    gpui_tokio::Tokio::spawn(cx, async move {
+                        let started = std::time::Instant::now();
+                        let mut results =
+                            client.generate_candidates(&key, request, 1, ticket).await?;
+                        tracing::info!(
+                            seconds = started.elapsed().as_secs_f32(),
+                            "cover candidate ready"
+                        );
+                        let result = results.pop().ok_or(GenerationError::InvalidResponse)?;
+                        let permit = cover_generation::image_decode_permit().await?;
+                        tokio::task::spawn_blocking(move || {
+                            let _permit = permit;
+                            let preview = thumbnail(&result.bytes)?;
+                            Ok::<_, GenerationError>((Arc::new(result), preview))
+                        })
+                        .await
+                        .map_err(|_| GenerationError::InvalidImage)?
+                    })
+                }) else {
+                    return;
+                };
+                requests.push(task);
+            }
+            while let Some(result) = futures_util::StreamExt::next(&mut requests).await {
+                let result = result.unwrap_or(Err(GenerationError::Cancelled));
+                let keep_going = this
+                    .update_in(cx, |this, window, cx| {
+                        this.finish_cover_candidate(
+                            generation, &target, &context, result, window, cx,
+                        )
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    return;
                 }
-                cx.notify();
-                window.refresh();
-            })
-            .ok();
+            }
         }));
         cx.notify();
+    }
+
+    /// One candidate came back (or failed). Returns whether to keep waiting
+    /// for the rest.
+    fn finish_cover_candidate(
+        &mut self,
+        generation: u64,
+        target: &str,
+        context: &GenerationContext,
+        result: Result<(Arc<GeneratedBackground>, Arc<RenderImage>), GenerationError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.sidebar.title_cards.cover.generation != generation {
+            return false;
+        }
+        let current = self.cover_context(target);
+        let state = &mut self.sidebar.title_cards.cover;
+        if current.as_ref() != Some(context) {
+            state.scope.cancel();
+            state.busy = false;
+            state.pending = 0;
+            state.task = None;
+            state.error = Some(tr::editor::cover::changed().into());
+            cx.notify();
+            return false;
+        }
+        state.pending = state.pending.saturating_sub(1);
+        match result {
+            Ok((result, preview)) if state.scope.accepts(&result, context) => {
+                state.candidates.push((result, preview));
+            }
+            Ok(_) => {}
+            Err(GenerationError::Cancelled) => {}
+            Err(error) => {
+                if state.pending == 0 && state.candidates.is_empty() {
+                    state.error = Some(error_message(error));
+                }
+                tracing::warn!(?error, "a cover candidate failed");
+            }
+        }
+        // Setup failed: nothing else is coming.
+        if state.candidates.is_empty() && state.error.is_some() {
+            state.pending = 0;
+        }
+        let done = state.pending == 0;
+        if done {
+            state.busy = false;
+            state.task = None;
+            state.started = None;
+            // `CAP_GPUI_AUTO_COVER_PICK=<n>`: pick candidate n the way a
+            // click does (synthetic clicks are dropped).
+            #[cfg(debug_assertions)]
+            if let Some(index) = std::env::var("CAP_GPUI_AUTO_COVER_PICK")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                self.pick_cover_candidate(index, window, cx);
+            }
+        }
+        cx.notify();
+        window.refresh();
+        !done
     }
 
     fn finish_cover_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -738,7 +851,8 @@ impl EditorWindow {
         let state = &self.sidebar.title_cards.cover;
         let image = state.preview.clone().or_else(|| state.shown.clone());
         let busy = state.busy || state.applying;
-        let picking = !busy && !state.candidates.is_empty();
+        // The candidates, and the places still waiting for one.
+        let picking = !state.applying && (!state.candidates.is_empty() || state.pending > 0);
         if !busy && !picking && image.is_none() && state.error.is_none() {
             return None;
         }
@@ -747,6 +861,20 @@ impl EditorWindow {
             .title_card(cap_project::TitleCardRole::Intro)
             .map(|segment| segment.content.clone())
             .unwrap_or_default();
+        // Covers are shown whole, at their own ratio, the panel's width.
+        let aspect = state
+            .candidates
+            .first()
+            .map(|(result, _)| result.origin.actual)
+            .map(|size| size.width as f32 / size.height.max(1) as f32)
+            .or_else(|| {
+                self.frame_layout.as_ref().map(|layout| {
+                    layout.output_size[0] as f32 / layout.output_size[1].max(1) as f32
+                })
+            })
+            .filter(|aspect| aspect.is_finite() && *aspect > 0.)
+            .unwrap_or(16. / 9.);
+        let cover_height = ((crate::editor_window::SIDEBAR_WIDTH - 36.) / aspect).clamp(120., 300.);
         let frame = div()
             .id("assistant-cover-image")
             .relative()
@@ -755,51 +883,82 @@ impl EditorWindow {
             .rounded(px(10.))
             .overflow_hidden()
             .bg(Hsla::from(theme.editor.ctl));
+        let frame = frame.h(px(cover_height));
         let frame = if picking {
-            // Two finished covers side by side: a click uses that one.
-            let count = state.candidates.len();
+            let waiting = state.busy && state.pending > 0;
+            let heading = if waiting {
+                tr::editor::assistant::cover_waiting(
+                    state
+                        .started
+                        .map_or(0, |started| started.elapsed().as_secs())
+                        as usize,
+                )
+                .to_string()
+            } else {
+                tr::editor::assistant::cover_pick().to_string()
+            };
+            let slot = |id: gpui::ElementId| {
+                div()
+                    .id(id)
+                    .w_full()
+                    .h(px(cover_height))
+                    .rounded(px(8.))
+                    .overflow_hidden()
+                    .bg(Hsla::from(theme.editor.ctl))
+            };
             div()
                 .id("assistant-cover-candidates")
                 .flex()
                 .flex_col()
-                .gap(px(6.))
+                .gap(px(8.))
                 .child(
                     div()
                         .text_size(px(12.))
                         .text_color(Hsla::from(theme.editor.text_2))
-                        .child(tr::editor::assistant::cover_pick()),
+                        .child(heading),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.))
-                        .children(state.candidates.iter().enumerate().map(
-                            |(index, (_, preview))| {
-                                div()
-                                    .id(("assistant-cover-candidate", index))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h(px(if count > 1 { 96. } else { 168. }))
-                                    .rounded(px(8.))
-                                    .overflow_hidden()
-                                    .cursor_pointer()
-                                    .bg(Hsla::from(theme.editor.ctl))
-                                    .border_1()
-                                    .border_color(Hsla::from(theme.editor.line))
-                                    .hover(|style| {
-                                        style.border_color(Hsla::from(theme.editor.text_2))
+                .children(
+                    state
+                        .candidates
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (_, preview))| {
+                            slot(("assistant-cover-candidate", index).into())
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(Hsla::from(theme.editor.line))
+                                .hover(|style| style.border_color(Hsla::from(theme.editor.accent)))
+                                .when(!waiting, |slot| {
+                                    slot.tooltip(move |_, cx| {
+                                        ui::Tooltip::new(&theme, tr::editor::assistant::cover_use())
+                                            .view(cx)
                                     })
-                                    .child(
-                                        img(preview.clone())
-                                            .size_full()
-                                            .object_fit(gpui::ObjectFit::Cover),
-                                    )
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.pick_cover_candidate(index, window, cx)
-                                    }))
-                            },
-                        )),
+                                })
+                                .child(
+                                    img(preview.clone())
+                                        .size_full()
+                                        .object_fit(gpui::ObjectFit::Contain),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.pick_cover_candidate(index, window, cx)
+                                }))
+                        }),
                 )
+                .children((0..if waiting { state.pending } else { 0 }).map(|index| {
+                    slot(("assistant-cover-pending", index).into())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            ui::CircularProgress::new(
+                                px(16.),
+                                px(1.5),
+                                Hsla::from(theme.editor.line),
+                                Hsla::from(theme.editor.text_2),
+                            )
+                            .indeterminate(),
+                        )
+                }))
         } else {
             let frame = frame;
             match (&image, busy) {
@@ -809,7 +968,7 @@ impl EditorWindow {
                         img(image.clone())
                             .size_full()
                             .rounded(px(10.))
-                            .object_fit(gpui::ObjectFit::Cover),
+                            .object_fit(gpui::ObjectFit::Contain),
                     )
                     .tooltip(move |_, cx| {
                         ui::Tooltip::new(&theme, tr::editor::assistant::cover_settings()).view(cx)
@@ -890,7 +1049,19 @@ impl EditorWindow {
                             })),
                     )
                 })
-                .when(!busy, |row| {
+                .when(!busy && picking, |row| {
+                    row.child(
+                        ui::EditorButton::plain(&theme, "assistant-cover-more")
+                            .left_icon("icons/plus.svg")
+                            .icon_size(px(12.))
+                            .height(px(26.))
+                            .label(tr::editor::assistant::cover_more())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.more_cover_candidates(window, cx)
+                            })),
+                    )
+                })
+                .when(!busy && !picking, |row| {
                     row.child(
                         ui::EditorButton::plain(&theme, "assistant-cover-again")
                             .left_icon("icons/refresh-cw.svg")

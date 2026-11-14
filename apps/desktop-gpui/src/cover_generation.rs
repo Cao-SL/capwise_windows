@@ -189,6 +189,7 @@ pub(crate) enum TextArea {
     Center,
 }
 
+#[derive(Clone)]
 pub(crate) struct BackgroundRequest {
     pub model: String,
     pub profile: ArkProfile,
@@ -377,6 +378,17 @@ impl GenerationScope {
         }
     }
 
+    /// Another ticket for the request still running or still on offer, so
+    /// more candidates join the ones already shown instead of replacing them.
+    pub fn more(&self, context: GenerationContext) -> Option<GenerationTicket> {
+        let id = (*self.current.borrow())?;
+        Some(GenerationTicket {
+            id,
+            context,
+            current: self.current.subscribe(),
+        })
+    }
+
     pub fn cancel(&mut self) {
         let _ = self.current.send_replace(None);
     }
@@ -404,6 +416,7 @@ impl Drop for GenerationScope {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct GenerationTicket {
     id: Uuid,
     context: GenerationContext,

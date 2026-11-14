@@ -1979,44 +1979,6 @@ impl EditorWindow {
         let state = &self.assistant;
         let conversation_started = !state.messages.is_empty() || state.cover_active;
 
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .flex_none()
-            .h(px(32.))
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(Hsla::from(theme.editor.text_1))
-                    .child(tr::editor::assistant::title()),
-            )
-            .child(div().flex().gap(px(2.)).when(conversation_started, |row| {
-                row.child(
-                    ui::EditorButton::plain(&theme, "assistant-new")
-                        .left_icon("icons/message-square-plus.svg")
-                        .icon_size(px(15.))
-                        .tooltip(&theme, tr::editor::assistant::new_chat())
-                        .disabled(self.assistant_cover_busy())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.cancel_assistant(cx);
-                            if this.assistant.cover_active {
-                                this.cancel_cover_generation(cx);
-                            }
-                            this.assistant.cover_active = false;
-                            this.assistant.messages.clear();
-                            this.assistant.preview = None;
-                            this.assistant.error = None;
-                            this.assistant.session = None;
-                            if let Some(input) = &this.assistant.input {
-                                input.update(cx, |input, cx| input.set_text("", cx));
-                            }
-                            this.open_assistant(window, cx);
-                        })),
-                )
-            }));
-
         let mut conversation = div()
             .id("assistant-conversation")
             .flex_1()
@@ -2165,7 +2127,6 @@ impl EditorWindow {
                 .pb(px(12.))
                 .bg(Hsla::from(theme.editor.card))
                 .text_size(px(13.))
-                .child(header)
                 .child(conversation)
                 .child(self.render_assistant_composer(cx))
                 .children(self.render_assistant_models(cx))
@@ -2447,6 +2408,23 @@ impl EditorWindow {
 
     /// One outlined box: the request, then skill and model on the left and
     /// send on the right.
+    /// Start over: a fresh conversation, the composer cleared.
+    fn new_assistant_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_assistant(cx);
+        if self.assistant.cover_active {
+            self.cancel_cover_generation(cx);
+        }
+        self.assistant.cover_active = false;
+        self.assistant.messages.clear();
+        self.assistant.preview = None;
+        self.assistant.error = None;
+        self.assistant.session = None;
+        if let Some(input) = &self.assistant.input {
+            input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.open_assistant(window, cx);
+    }
+
     fn render_assistant_composer(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         let state = &self.assistant;
@@ -2520,6 +2498,19 @@ impl EditorWindow {
                             })),
                     )
                     .child(div().flex_1())
+                    .when(!state.messages.is_empty() || state.cover_active, |row| {
+                        row.child(
+                            ui::EditorButton::plain(&theme, "assistant-new")
+                                .left_icon("icons/message-square-plus.svg")
+                                .icon_size(px(14.))
+                                .height(px(28.))
+                                .tooltip(&theme, tr::editor::assistant::new_chat())
+                                .disabled(self.assistant_cover_busy())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.new_assistant_chat(window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .id("assistant-send")
