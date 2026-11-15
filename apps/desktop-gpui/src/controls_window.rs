@@ -384,11 +384,6 @@ impl ControlsWindow {
             )
     }
 
-    /// The mic indicator: icon plus the live level track underneath
-    /// (`createAudioInputLevel` in the bar: -60..0 dB linear, blue-9 fill on a
-    /// gray-10 track). In instant mode with a live mic it doubles as the mute
-    /// button -- studio deliberately does not expose mute, since the mic is an
-    /// editable track and muted spans would bake zeros in.
     fn render_microphone(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let session = self.session.read(cx);
@@ -407,7 +402,17 @@ impl ControlsWindow {
             tr::main::device::microphone()
         };
         self.level_bar.update(cx, |bar, cx| {
-            bar.configure(meter_active, theme.blue_9.into(), theme.gray_10.into(), cx);
+            bar.configure(
+                meter_active,
+                theme.gray_12.into(),
+                if meter_active {
+                    theme.gray_6
+                } else {
+                    theme.gray_4
+                }
+                .into(),
+                cx,
+            );
         });
 
         let icon = if !self.has_microphone || muted {
@@ -426,7 +431,7 @@ impl ControlsWindow {
 
         div()
             .id("microphone")
-            .w(px(if self.has_microphone { 50. } else { 28. }))
+            .w(px(if self.has_microphone { 60. } else { 28. }))
             .h(px(32.))
             .flex_shrink_0()
             .flex()
