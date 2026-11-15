@@ -259,7 +259,30 @@ impl EditorWindow {
         match element {
             CanvasSelection::CoverLayer(index, layer) => {
                 let card = self.cover_card(index)?.title_card.as_ref()?;
-                Some(pose_rect(&card.layers.get(layer)?.pose))
+                let item = card.layers.get(layer)?;
+                let pose = match &item.kind {
+                    CoverLayerKind::Image {
+                        path,
+                        persona: Some(_),
+                        ..
+                    } => {
+                        let size = *self
+                            .sidebar
+                            .title_cards
+                            .layers
+                            .sizes
+                            .borrow_mut()
+                            .entry(path.clone())
+                            .or_insert_with(|| {
+                                image::image_dimensions(self.project_path.join(path)).ok()
+                            });
+                        size.map_or(item.pose, |size| {
+                            item.display_pose(size, self.cover_output())
+                        })
+                    }
+                    _ => item.pose,
+                };
+                Some(pose_rect(&pose))
             }
             CanvasSelection::CoverSubject(index) => {
                 let segment = self.cover_card(index)?;
@@ -663,8 +686,10 @@ impl EditorWindow {
         let Some(card_id) = self.card_id_at(index) else {
             return;
         };
+        let Some(layer_id) = self.cover_layer(index, layer).map(|item| item.id.clone()) else {
+            return;
+        };
         let project_path = self.project_path.clone();
-        let output = self.cover_output();
         let reference = CoverPersonaRef {
             persona: persona.id.clone(),
             file,
@@ -684,20 +709,22 @@ impl EditorWindow {
                         let Some(index) = this.card_index_by_id(&card_id) else {
                             return;
                         };
-                        this.edit_cover_layer(index, layer, window, cx, move |layers, layer| {
-                            let item = &mut layers[layer];
-                            let bottom = item.pose.center.y + item.pose.size.y / 2.;
-                            let fitted = picture_pose(
-                                (item.pose.center.x, item.pose.center.y),
-                                item.pose.size.y,
-                                size,
-                                output,
-                            );
-                            item.pose.size = fitted.size;
-                            item.pose.center.y = bottom - fitted.size.y / 2.;
+                        let output = this.cover_output();
+                        this.update_title_card(index, window, cx, move |segment| {
+                            let Some(item) = segment
+                                .title_card
+                                .as_mut()
+                                .unwrap()
+                                .layers
+                                .iter_mut()
+                                .find(|item| item.id == layer_id && !item.locked)
+                            else {
+                                return;
+                            };
                             if let CoverLayerKind::Image { path, persona, .. } = &mut item.kind {
                                 *path = record.path;
                                 *persona = Some(reference);
+                                item.pose = item.display_pose(size, output);
                             }
                         });
                     }

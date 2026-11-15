@@ -122,28 +122,9 @@ impl TitleCardLayer {
             _ => self.subject.clear_title_card_picture(),
         }
 
-        let pictures: Vec<_> = card
-            .layers
-            .iter()
-            .enumerate()
-            .filter_map(|(z, layer)| match &layer.kind {
-                CoverLayerKind::Image { path, mirror, .. } => Some((
-                    z as u32 + 1,
-                    path.clone(),
-                    layer.pose,
-                    *mirror,
-                    layer.image_crop,
-                )),
-                _ => None,
-            })
-            .collect();
-        if pictures.is_empty() {
-            self.layer_images.clear_title_card_picture();
-        } else {
-            self.layer_images
-                .prepare_cover_layers(constants, output, &pictures)
-                .await;
-        }
+        self.layer_images
+            .prepare_cover_layers(constants, output, &card.layers)
+            .await;
 
         if self
             .prepared

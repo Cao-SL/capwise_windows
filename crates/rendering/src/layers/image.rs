@@ -67,6 +67,7 @@ impl FileVersion {
 
 struct CachedTexture {
     texture: wgpu::Texture,
+    source_size: (u32, u32),
     byte_len: u64,
     last_used: u64,
 }
@@ -424,7 +425,7 @@ fn decode_image(
     path: &Path,
     expected: &FileVersion,
     max_dimension: u32,
-) -> anyhow::Result<Vec<RgbaImage>> {
+) -> anyhow::Result<((u32, u32), Vec<RgbaImage>)> {
     let file = File::open(path)?;
     let metadata = file.metadata()?;
     anyhow::ensure!(
@@ -456,12 +457,13 @@ fn decode_image(
     let orientation = decoder.orientation()?;
     let mut decoded = image::DynamicImage::from_decoder(decoder)?;
     decoded.apply_orientation(orientation);
+    let source_size = (decoded.width(), decoded.height());
     let levels = premultiplied_mips(decoded.into_rgba8(), max_dimension);
     anyhow::ensure!(
         FileVersion::read(path) == *expected,
         "Image changed while decoding"
     );
-    Ok(levels)
+    Ok((source_size, levels))
 }
 
 fn upload_texture(
@@ -628,7 +630,7 @@ impl ImageLayer {
             return Some(texture.texture.clone());
         }
         if let Some(texture) = reusable {
-            self.cache_texture(path, texture.clone());
+            self.cache_texture(path, texture.clone(), (texture.width(), texture.height()));
             return Some(texture);
         }
         let decode_path = path.to_path_buf();
@@ -638,11 +640,11 @@ impl ImageLayer {
             decode_image(&decode_path, &decode_version, max_dimension)
         })
         .await;
-        let levels = match decoded
+        let (source_size, levels) = match decoded
             .map_err(anyhow::Error::from)
             .and_then(|result| result)
         {
-            Ok(levels) => levels,
+            Ok(image) => image,
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "Failed to decode image overlay");
                 if let Some(entry) = self.cache.get_mut(path) {
@@ -652,11 +654,11 @@ impl ImageLayer {
             }
         };
         let texture = upload_texture(device, queue, &levels);
-        self.cache_texture(path, texture.clone());
+        self.cache_texture(path, texture.clone(), source_size);
         Some(texture)
     }
 
-    fn cache_texture(&mut self, path: &Path, texture: wgpu::Texture) {
+    fn cache_texture(&mut self, path: &Path, texture: wgpu::Texture, source_size: (u32, u32)) {
         let byte_len = (0..texture.mip_level_count())
             .map(|level| {
                 u64::from((texture.width() >> level).max(1))
@@ -668,6 +670,7 @@ impl ImageLayer {
         if let Some(entry) = self.cache.get_mut(path) {
             entry.state = CacheState::Ready(CachedTexture {
                 texture,
+                source_size,
                 byte_len,
                 last_used: self.counter,
             });
@@ -886,12 +889,29 @@ impl ImageLayer {
         &mut self,
         constants: &RenderVideoConstants,
         output: (u32, u32),
-        layers: &[(u32, String, cap_project::LayerPose, bool, Option<[f32; 4]>)],
+        layers: &[cap_project::CoverLayer],
     ) {
         self.draws.clear();
         self.draw_tracks.clear();
         let project = constants.recording_meta.project_path.clone();
-        let relatives: Vec<String> = layers.iter().map(|layer| layer.1.clone()).collect();
+        let pictures: Vec<_> = layers
+            .iter()
+            .enumerate()
+            .filter_map(|(z, layer)| match &layer.kind {
+                cap_project::CoverLayerKind::Image { path, mirror, .. } => {
+                    Some((z as u32 + 1, layer, path, *mirror))
+                }
+                _ => None,
+            })
+            .collect();
+        if pictures.is_empty() {
+            self.clear_title_card_picture();
+            return;
+        }
+        let relatives: Vec<String> = pictures
+            .iter()
+            .map(|(_, _, path, _)| (*path).clone())
+            .collect();
         let resolved = tokio::task::spawn_blocking(move || {
             let root = project.canonicalize().ok();
             relatives
@@ -915,7 +935,7 @@ impl ImageLayer {
             .map(|(path, _)| path.clone())
             .collect();
         self.cache.retain(|cached, _| keep.contains(cached));
-        for ((track, _, pose, mirror, crop), resolved) in layers.iter().zip(resolved) {
+        for ((track, layer, _, mirror), resolved) in pictures.into_iter().zip(resolved) {
             let Some((path, version)) = resolved else {
                 tracing::warn!("Cover layer image is missing or outside the project");
                 continue;
@@ -926,11 +946,16 @@ impl ImageLayer {
             else {
                 continue;
             };
-            if let Some(mut uniforms) = posed_uniforms(pose, output, *mirror) {
-                if let Some(crop) = crop {
-                    uniforms.uv_rect = *crop;
+            let source_size = match self.cache.get(&path).map(|entry| &entry.state) {
+                Some(CacheState::Ready(cached)) => cached.source_size,
+                _ => (texture.width(), texture.height()),
+            };
+            let pose = layer.display_pose(source_size, output);
+            if let Some(mut uniforms) = posed_uniforms(&pose, output, mirror) {
+                if let Some(crop) = layer.image_crop {
+                    uniforms.uv_rect = crop;
                 }
-                self.push_draw_with_track(&constants.device, &texture, uniforms, *track);
+                self.push_draw_with_track(&constants.device, &texture, uniforms, track);
             }
         }
         self.cached_draws.truncate(self.draws.len());
@@ -1571,7 +1596,8 @@ mod tests {
                 .save(&path)
                 .unwrap();
             let original_version = FileVersion::read(&path);
-            let resized = decode_image(&path, &original_version, 16).unwrap();
+            let (source_size, resized) = decode_image(&path, &original_version, 16).unwrap();
+            assert_eq!(source_size, (33, 9));
             assert_eq!(resized[0].dimensions(), (16, 4));
             let original = layer
                 .ensure_texture(&device, &queue, &path, &original_version, None)
