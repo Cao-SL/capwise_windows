@@ -4073,7 +4073,7 @@ impl OverlayWindow {
                             )
                             .child(
                                 svg()
-                                    .path("icons/gear.svg")
+                                    .path("icons/timer.svg")
                                     .size(px(20.))
                                     .text_color(theme.gray_12),
                             )
