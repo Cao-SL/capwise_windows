@@ -843,6 +843,7 @@ impl EditorWindow {
             self.canvas_selection = Some(element);
         }
         if let Some(card) = element.cover_card() {
+            self.show_cover_on_canvas(card, cx);
             // The card stays selected so its panel stays open.
             self.set_selection(
                 Some(crate::editor_edits::Selection::single(
@@ -932,6 +933,7 @@ impl EditorWindow {
             return;
         }
         if let Some(card) = element.cover_card() {
+            self.show_cover_on_canvas(card, cx);
             self.set_selection(
                 Some(crate::editor_edits::Selection::single(
                     TrackKind::Text,
@@ -1714,7 +1716,8 @@ impl EditorWindow {
                 && self.shape_drag.is_none()
                 && self.shape_tool.is_none()
                 && !self.redaction_tool_active()
-                && self.canvas_text_edit.is_none())
+                && self.canvas_text_edit.is_none()
+                && !(active_card.is_some() && self.title_card_workspace_open()))
         {
             return None;
         }
@@ -1742,8 +1745,16 @@ impl EditorWindow {
                     .inset_0()
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.set_selection(None, cx);
+                        cx.listener(move |this, _, window, cx| {
+                            if this
+                                .selected_title_card()
+                                .is_some_and(|(index, _)| active_card == Some(index))
+                            {
+                                this.stop_canvas_text_edit(cx);
+                                this.end_field_edit(cx);
+                            } else {
+                                this.set_selection(None, cx);
+                            }
                             this.canvas_selection = None;
                             cx.notify();
                             window.refresh();

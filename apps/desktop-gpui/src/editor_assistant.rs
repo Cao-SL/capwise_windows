@@ -1720,6 +1720,7 @@ impl EditorWindow {
                     cx.stop_propagation();
                 }));
         }
+        self.sidebar.title_cards.empty_role = None;
         self.assistant.open = true;
         self.sidebar.tab = crate::editor_sidebar::SidebarTab::Assistant;
         self.transcript.open = false;

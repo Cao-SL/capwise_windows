@@ -47,6 +47,10 @@ pub(crate) struct CoverLayerUi {
 }
 
 impl CoverLayerUi {
+    pub(crate) fn close_person_picker(&mut self) {
+        self.adding_person = None;
+    }
+
     /// Opens the person picker on one persona.
     pub(crate) fn show_persona(&mut self, id: &str) {
         self.adding_person = Some(id.to_owned());
@@ -292,37 +296,49 @@ impl EditorWindow {
             self.title_card_error(tr::editor::title_cards::layers_full().into(), window, cx);
             return;
         }
+        let layer_id = layer.id.clone();
         self.update_title_card(index, window, cx, move |segment| {
             segment.title_card.as_mut().unwrap().layers.push(layer);
         });
-        let count = self
-            .project
-            .timeline
-            .as_ref()
-            .and_then(|timeline| timeline.text_segments.get(index))
-            .and_then(|segment| segment.title_card.as_ref())
-            .map_or(0, |card| card.layers.len());
-        if count > 0 {
+        if self
+            .selected_title_card()
+            .is_some_and(|(current, _)| current == index)
+            && let Some(layer) = self
+                .cover_card(index)
+                .and_then(|segment| segment.title_card.as_ref())
+                .and_then(|card| card.layers.iter().position(|item| item.id == layer_id))
+        {
             self.show_cover_on_canvas(index, cx);
-            self.canvas_selection = Some(CanvasSelection::CoverLayer(index, count - 1));
+            self.canvas_selection = Some(CanvasSelection::CoverLayer(index, layer));
         }
         cx.notify();
     }
 
-    /// Moves the playhead onto the card so its layers are on the canvas.
-    fn show_cover_on_canvas(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some((start, end)) = self
-            .project
-            .timeline
-            .as_ref()
-            .and_then(|timeline| timeline.text_segments.get(index))
-            .map(|segment| (segment.start, segment.end))
-        else {
-            return;
-        };
-        let time = self.playhead_time();
-        if time < start || time >= end {
-            self.seek_to_time(start + ((end - start) * 0.5).min(0.1), cx);
+    pub(crate) fn title_card_at_playhead(&self, index: usize) -> bool {
+        self.cover_card(index).is_some_and(|segment| {
+            let time = self.playhead_time();
+            time >= segment.start && time < segment.end
+        })
+    }
+
+    pub(crate) fn show_cover_on_canvas(&mut self, index: usize, cx: &mut Context<Self>) {
+        let time = self.cover_card(index).and_then(|segment| {
+            crate::editor_title_cards::card_preview_time(
+                segment,
+                crate::editor_window::EDITOR_PREVIEW_FPS,
+            )
+        });
+        if let Some(time) = time {
+            if self.playing {
+                self.stop_playback(cx);
+            }
+            let cleared_preview = self.clear_timeline_preview();
+            if !self.title_card_at_playhead(index) {
+                self.seek_to_time(time, cx);
+            } else if cleared_preview {
+                self.publish_project();
+                cx.notify();
+            }
         }
     }
 
@@ -855,6 +871,7 @@ impl EditorWindow {
         let adding_person = self.sidebar.title_cards.layers.adding_person.clone();
         let add_row = div()
             .flex()
+            .flex_wrap()
             .gap(px(6.))
             .child(
                 button(
@@ -1013,8 +1030,57 @@ impl EditorWindow {
             }
             _ => None,
         };
+        let selected_index = selected.as_ref().map(|(layer, _)| *layer);
         let editor =
             selected.map(|(layer, item)| self.render_cover_layer_editor(index, layer, &item, cx));
+        let elements = (!card.layers.is_empty()).then(|| {
+            ui::Field::stacked(&theme, tr::editor::cover_templates::elements()).child(
+                div().flex().flex_wrap().gap(px(6.)).children(
+                    card.layers.iter().enumerate().rev().map(|(layer, item)| {
+                        let fallback = match &item.kind {
+                            CoverLayerKind::Title { .. } | CoverLayerKind::Text { .. } => {
+                                tr::editor::title_cards::add_text()
+                            }
+                            CoverLayerKind::Image {
+                                persona: Some(_), ..
+                            } => tr::editor::title_cards::add_person(),
+                            CoverLayerKind::Image { .. } => tr::editor::title_cards::add_image(),
+                        };
+                        let text = match &item.kind {
+                            CoverLayerKind::Title { .. } => self
+                                .cover_card(index)
+                                .map(|segment| segment.content.as_str()),
+                            CoverLayerKind::Text { content, .. } => Some(content.as_str()),
+                            _ => None,
+                        };
+                        let label = text
+                            .and_then(|text| text.trim().lines().next())
+                            .filter(|text| !text.is_empty())
+                            .unwrap_or(fallback);
+                        let mut short = label.chars().take(18).collect::<String>();
+                        if short.len() < label.len() {
+                            short.push('…');
+                        }
+                        ui::EditorButton::plain(&theme, ("select-cover-layer", layer))
+                            .choice(&theme)
+                            .height(px(28.))
+                            .text_size(px(12.))
+                            .label(short)
+                            .tooltip(&theme, label.to_owned())
+                            .pressed(selected_index == Some(layer))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.stop_canvas_text_edit(cx);
+                                this.end_field_edit(cx);
+                                this.show_cover_on_canvas(index, cx);
+                                this.canvas_selection =
+                                    Some(CanvasSelection::CoverLayer(index, layer));
+                                this.focus_root(window, cx);
+                                cx.notify();
+                            }))
+                    }),
+                ),
+            )
+        });
 
         ui::Field::stacked(&theme, tr::editor::title_cards::add())
             .child(
@@ -1024,6 +1090,7 @@ impl EditorWindow {
                     .gap(px(8.))
                     .child(add_row)
                     .children(person_grid)
+                    .children(elements)
                     .children(editor),
             )
             .into_any_element()

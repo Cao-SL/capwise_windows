@@ -2242,6 +2242,8 @@ editing_note = "このセグメントのみを編集しています。全体設�
 title = "スタイル{number} · {group}"
 
 [editor.sidebar.tab]
+frame_background = "背景"
+no_camera = "この録画にカメラ映像はありません。"
 audio = "音声"
 background = "画面"
 camera = "カメラ"
@@ -4063,3 +4065,15 @@ fox = "キツネ"
 raven = "ワタリガラス"
 retro_robot = "レトロロボット"
 silver_presenter = "銀髪のプレゼンター"
+
+[editor.cover_templates]
+canvas_hint = "ドラッグで移動 · テキストをダブルクリックして編集"
+cover = "表紙"
+outro = "エンディング"
+workspace = "表紙"
+create_cover = "表紙を作成"
+create_outro = "エンディングを追加"
+intro_hint = "動画の冒頭をデザインします。PNG としても書き出せます。"
+outro_hint = "最後のクリップの後にエンディングを追加します。"
+preview_card = "キャンバスに表示"
+elements = "要素"

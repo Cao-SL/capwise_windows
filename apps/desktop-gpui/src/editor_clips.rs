@@ -718,6 +718,7 @@ impl EditorWindow {
         if !self.project_ready() {
             return;
         }
+        self.sidebar.title_cards.empty_role = None;
         self.set_selection(None, cx);
         if self.clips.open {
             self.close_clips(window, cx);

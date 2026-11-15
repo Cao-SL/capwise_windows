@@ -2024,6 +2024,17 @@ impl EditorWindow {
     /// `CameraConfig` (`ConfigSidebar.tsx:2978-3330`).
     pub(crate) fn render_camera_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
+        if !self
+            .summary()
+            .is_some_and(|summary| summary.has_camera || summary.display_is_camera)
+            && self.sidebar.style_target.is_none()
+        {
+            return div()
+                .text_size(px(12.))
+                .text_color(Hsla::from(theme.editor.text_2))
+                .child(tr::editor::sidebar::tab::no_camera())
+                .into_any_element();
+        }
         if self
             .summary()
             .is_some_and(|summary| summary.display_is_camera && !summary.has_camera)
@@ -2034,7 +2045,7 @@ impl EditorWindow {
                 .gap(px(16.))
                 .child(crate::editor_sidebar::tab_header(
                     &theme,
-                    crate::editor_sidebar::SidebarTab::Camera.title(),
+                    tr::editor::sidebar::tab::camera(),
                     None,
                 ))
                 .child(self.slider_field(
@@ -2062,7 +2073,7 @@ impl EditorWindow {
 
         let header = crate::editor_sidebar::tab_header(
             &theme,
-            crate::editor_sidebar::SidebarTab::Camera.title(),
+            tr::editor::sidebar::tab::camera(),
             Some(
                 ui::Toggle::plain(&theme, "camera-show", !hidden)
                     .on_click(cx.listener(|this, _, window, cx| {

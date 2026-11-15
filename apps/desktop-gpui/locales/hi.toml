@@ -2242,6 +2242,8 @@ editing_note = "सिर्फ़ यह सेगमेंट एडिट ह
 title = "स्टाइल {number} · {group}"
 
 [editor.sidebar.tab]
+frame_background = "बैकग्राउंड"
+no_camera = "इस रिकॉर्डिंग में कैमरे का वीडियो नहीं है।"
 audio = "ऑडियो"
 background = "फ़्रेम"
 camera = "कैमरा"
@@ -4063,3 +4065,15 @@ fox = "लोमड़ी"
 raven = "काला कौआ"
 retro_robot = "रेट्रो रोबोट"
 silver_presenter = "सफ़ेद बालों वाला प्रस्तुतकर्ता"
+
+[editor.cover_templates]
+canvas_hint = "खिसकाने के लिए खींचें · टेक्स्ट बदलने के लिए डबल-क्लिक करें"
+cover = "कवर"
+outro = "अंत"
+workspace = "कवर"
+create_cover = "कवर बनाएँ"
+create_outro = "अंत जोड़ें"
+intro_hint = "वीडियो की शुरुआत डिज़ाइन करें। इसे PNG के रूप में भी निर्यात कर सकते हैं।"
+outro_hint = "आखिरी क्लिप के बाद अंत जोड़ें।"
+preview_card = "कैनवास पर दिखाएँ"
+elements = "तत्व"

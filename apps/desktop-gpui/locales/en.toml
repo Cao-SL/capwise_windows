@@ -2265,6 +2265,8 @@ editing_note = "Editing this segment only. Global settings are unchanged."
 title = { text = "Style {number} · {group}", context = "{number} is the style segment's position, starting at 1; {group} is Background & frame, Camera or Cursor." }
 
 [editor.sidebar.tab]
+frame_background = "Background"
+no_camera = "This recording has no camera footage."
 audio = "Audio"
 background = "Frame"
 camera = "Camera"
@@ -3738,7 +3740,7 @@ not_started = "Caption processing did not start. Check its settings or export th
 project_changed = "The project changed while preparing the export. Start export again to use the latest version."
 
 [editor.title_cards]
-add = "Add to cover"
+add = "Add elements"
 add_text = "Text"
 add_person = "Person"
 add_sticker = "Sticker"
@@ -4185,6 +4187,14 @@ retro_robot = "Retro Robot"
 silver_presenter = "Silver-haired Presenter"
 
 [editor.cover_templates]
+canvas_hint = "Drag to move · Double-click text to edit"
+workspace = "Cover"
+create_cover = "Create cover"
+create_outro = "Add outro"
+intro_hint = "Design the opening of your video. You can also export it as a PNG."
+outro_hint = "Add a visual ending after the last clip."
+preview_card = "Show on canvas"
+elements = "Elements"
 templates = "Templates"
 hero_center = "Big title"
 title_left_person_right = "Title left · person right"

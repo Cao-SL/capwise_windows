@@ -4442,11 +4442,9 @@ impl EditorWindow {
                         .flex_col()
                         .gap(px(16.))
                         .child(
-                            ui::SelectionHeader::plain(&theme, "panel-title-card", label)
-                                .on_done(cx.listener(|this, _, _, cx| this.set_selection(None, cx)))
-                                .on_delete(cx.listener(|this, _, window, cx| {
-                                    this.delete_selected_segments(window, cx)
-                                })),
+                            ui::SelectionHeader::plain(&theme, "panel-title-card", label).on_done(
+                                cx.listener(|this, _, _, cx| this.close_title_card_workspace(cx)),
+                            ),
                         )
                         .child(self.render_title_card_panel(indices[0], cx))
                         .into_any_element()

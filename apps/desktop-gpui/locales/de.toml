@@ -2242,6 +2242,8 @@ editing_note = "Nur dieses Segment wird bearbeitet. Die globalen Einstellungen b
 title = "Stil {number} · {group}"
 
 [editor.sidebar.tab]
+frame_background = "Hintergrund"
+no_camera = "Diese Aufnahme enthält kein Kamerabild."
 audio = "Audio"
 background = "Bild"
 camera = "Kamera"
@@ -4063,3 +4065,15 @@ fox = "Fuchs"
 raven = "Rabe"
 retro_robot = "Retro-Roboter"
 silver_presenter = "Silberhaariger Moderator"
+
+[editor.cover_templates]
+canvas_hint = "Ziehen zum Verschieben · Doppelklick zum Bearbeiten"
+cover = "Cover"
+outro = "Abspann"
+workspace = "Cover"
+create_cover = "Cover erstellen"
+create_outro = "Abspann hinzufügen"
+intro_hint = "Gestalte den Anfang des Videos. Du kannst ihn auch als PNG exportieren."
+outro_hint = "Füge nach dem letzten Clip einen Abspann hinzu."
+preview_card = "Auf der Leinwand anzeigen"
+elements = "Elemente"

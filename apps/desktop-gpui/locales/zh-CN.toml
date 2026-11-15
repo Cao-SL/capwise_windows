@@ -2263,6 +2263,8 @@ editing_note = "仅编辑此分段。全局设置不变。"
 title = "样式 {number} · {group}"
 
 [editor.sidebar.tab]
+frame_background = "背景"
+no_camera = "这段录制没有摄像头画面。"
 audio = "音频"
 background = "画面"
 camera = "摄像头"
@@ -3736,7 +3738,7 @@ not_started = "字幕处理尚未启动。请检查相关设置，或按当前�
 project_changed = "准备导出时项目发生了变化，请重新导出以使用最新版本。"
 
 [editor.title_cards]
-add = "添加到封面"
+add = "添加元素"
 add_text = "文字"
 add_person = "人物"
 add_sticker = "表情"
@@ -4183,6 +4185,14 @@ retro_robot = "复古机器人"
 silver_presenter = "银发皮衣"
 
 [editor.cover_templates]
+canvas_hint = "拖动调整位置 · 双击修改文字"
+workspace = "封面"
+create_cover = "创建封面"
+create_outro = "添加片尾"
+intro_hint = "封面会出现在视频开头，也可以单独导出 PNG。"
+outro_hint = "在最后一段视频后添加片尾。"
+preview_card = "在画布上查看"
+elements = "画面元素"
 templates = "模板"
 hero_center = "大标题"
 title_left_person_right = "标题左·人物右"

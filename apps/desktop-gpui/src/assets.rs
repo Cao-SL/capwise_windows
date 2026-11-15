@@ -63,6 +63,7 @@ const ICONS: &[(&str, &[u8])] = assets!("icons":
     "clapperboard.svg",
     "chevron-down.svg",
     "chevrons-up-down.svg",
+    "cover.svg",
     "crop.svg",
     "cursor.svg",
     "chevron-left.svg",

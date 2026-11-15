@@ -49,6 +49,8 @@ pub(crate) struct TitleCardUi {
     pub(crate) error: Option<String>,
     pub(crate) picking_image: bool,
     pub(crate) applying: bool,
+    pub(crate) empty_role: Option<TitleCardRole>,
+    pub(crate) last_role: Option<TitleCardRole>,
     export_request: Option<Arc<()>>,
     export_task: Option<gpui::Task<()>>,
     exported: Option<String>,
@@ -583,6 +585,83 @@ impl EditorWindow {
         self.show_notice(message, window, cx);
     }
 
+    pub(crate) fn selected_title_card(&self) -> Option<(usize, TitleCardRole)> {
+        let selection = self.sidebar_selection()?;
+        let [index] = selection.indices.as_slice() else {
+            return None;
+        };
+        if selection.track != TrackKind::Text {
+            return None;
+        }
+        let segment = self.project.timeline.as_ref()?.text_segments.get(*index)?;
+        Some((*index, segment.title_card.as_ref()?.role))
+    }
+
+    pub(crate) fn title_card_workspace_open(&self) -> bool {
+        !self.clips.open
+            && !self.assistant.open
+            && (self.sidebar.title_cards.empty_role.is_some()
+                || self.selected_title_card().is_some())
+    }
+
+    pub(crate) fn close_title_card_workspace(&mut self, cx: &mut Context<Self>) {
+        self.sidebar.title_cards.empty_role = None;
+        self.sidebar.title_cards.layers.close_person_picker();
+        self.stop_canvas_text_edit(cx);
+        self.set_selection(None, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn open_title_card_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let role = self.sidebar.title_cards.last_role.unwrap_or_else(|| {
+            if self.project.title_card(TitleCardRole::Intro).is_none()
+                && self.project.title_card(TitleCardRole::Outro).is_some()
+            {
+                TitleCardRole::Outro
+            } else {
+                TitleCardRole::Intro
+            }
+        });
+        self.browse_title_card(role, window, cx);
+        self.focus_root(window, cx);
+    }
+
+    pub(crate) fn browse_title_card(
+        &mut self,
+        role: TitleCardRole,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.stop_canvas_text_edit(cx);
+        self.dismiss_sidebar_panels(cx);
+        self.arm_shape_tool(None, cx);
+        self.clear_redaction_tool();
+        self.sidebar.title_cards.error = None;
+        self.sidebar.title_cards.last_role = Some(role);
+        self.sidebar.title_cards.layers.close_person_picker();
+        if self.clips.open {
+            self.close_clips(window, cx);
+        }
+        self.assistant.open = false;
+        self.assistant.model_menu = false;
+        self.assistant.skill_menu = false;
+        if self.sidebar.tab == crate::editor_sidebar::SidebarTab::Assistant {
+            self.sidebar.tab = crate::editor_sidebar::SidebarTab::Captions;
+        }
+        if self.project.title_card(role).is_some() {
+            self.focus_title_card(role, cx);
+        } else {
+            self.set_selection(None, cx);
+            self.sidebar.title_cards.empty_role = Some(role);
+            self.sidebar.scroll.set_offset(gpui::point(px(0.), px(0.)));
+            cx.notify();
+        }
+    }
+
     pub(crate) fn open_title_card(
         &mut self,
         role: TitleCardRole,
@@ -632,8 +711,13 @@ impl EditorWindow {
             return;
         };
         self.clips.open = false;
+        self.sidebar.title_cards.empty_role = None;
+        self.sidebar.title_cards.last_role = Some(role);
         self.set_selection(Some(Selection::single(TrackKind::Text, index)), cx);
-        self.seek_to_time(time, cx);
+        if self.canvas_selection == Some(crate::editor_canvas::CanvasSelection::Text(index)) {
+            self.canvas_selection = None;
+        }
+        self.show_cover_on_canvas(index, cx);
         self.reveal_timeline_range(time, end, cx);
         self.reveal_timeline_row(TrackKind::Text, lane, cx);
     }
@@ -893,7 +977,7 @@ impl EditorWindow {
                             .full_width()
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
-                                    this.open_title_card(role, window, cx);
+                                    this.browse_title_card(role, window, cx);
                                 },
                             )),
                         )
@@ -955,6 +1039,84 @@ impl EditorWindow {
             .into_any_element()
     }
 
+    fn render_title_card_roles(&self, role: TitleCardRole, cx: &mut Context<Self>) -> AnyElement {
+        let roles = [TitleCardRole::Intro, TitleCardRole::Outro];
+        ui::SegmentedControl::editor(
+            &self.theme,
+            "cover-role",
+            roles
+                .into_iter()
+                .map(|value| {
+                    let label = match value {
+                        TitleCardRole::Intro => tr::editor::cover_templates::cover(),
+                        TitleCardRole::Outro => tr::editor::cover_templates::outro(),
+                    };
+                    ui::SegmentOption::new(label, value == role)
+                })
+                .collect(),
+        )
+        .stretch()
+        .on_select(cx.listener(move |this, selected: &usize, window, cx| {
+            let next = roles[*selected];
+            if next != role {
+                this.browse_title_card(next, window, cx);
+            }
+        }))
+        .into_any_element()
+    }
+
+    pub(crate) fn render_empty_title_card(
+        &self,
+        role: TitleCardRole,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let (label, hint, action) = match role {
+            TitleCardRole::Intro => (
+                tr::editor::title_cards::intro(),
+                tr::editor::cover_templates::intro_hint(),
+                tr::editor::cover_templates::create_cover(),
+            ),
+            TitleCardRole::Outro => (
+                tr::editor::title_cards::outro(),
+                tr::editor::cover_templates::outro_hint(),
+                tr::editor::cover_templates::create_outro(),
+            ),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .p(px(16.))
+            .child(
+                ui::SelectionHeader::plain(&theme, "empty-title-card", label)
+                    .on_done(cx.listener(|this, _, _, cx| this.close_title_card_workspace(cx))),
+            )
+            .child(self.render_title_card_roles(role, cx))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(Hsla::from(theme.editor.text_2))
+                    .child(hint),
+            )
+            .child(
+                ui::EditorButton::plain(&theme, "create-title-card")
+                    .outlined(&theme)
+                    .left_icon("icons/plus.svg")
+                    .label(action)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_title_card(role, window, cx);
+                    })),
+            )
+            .children(self.sidebar.title_cards.error.as_ref().map(|error| {
+                div()
+                    .text_size(px(12.))
+                    .text_color(gpui::rgb(0xdc2626))
+                    .child(error.clone())
+            }))
+            .into_any_element()
+    }
+
     pub(crate) fn render_title_card_panel(
         &self,
         index: usize,
@@ -994,25 +1156,6 @@ impl EditorWindow {
                 .bg(Hsla::from(theme.editor.line))
                 .into_any_element()
         };
-        let roles = ui::SegmentedControl::editor(
-            &theme,
-            "cover-role",
-            [
-                (TitleCardRole::Intro, tr::editor::cover_templates::cover()),
-                (TitleCardRole::Outro, tr::editor::cover_templates::outro()),
-            ]
-            .into_iter()
-            .map(|(value, label)| ui::SegmentOption::new(label, value == role))
-            .collect(),
-        )
-        .stretch()
-        .on_select(cx.listener(move |this, selected: &usize, window, cx| {
-            let next = [TitleCardRole::Intro, TitleCardRole::Outro][*selected];
-            if next != role {
-                this.canvas_selection = None;
-                this.open_title_card(next, window, cx);
-            }
-        }));
         let chip = |id: SharedString, label: &'static str| {
             ui::EditorButton::plain(&theme, id)
                 .choice(&theme)
@@ -1047,7 +1190,18 @@ impl EditorWindow {
             .flex()
             .flex_col()
             .gap(px(16.))
-            .child(roles)
+            .child(self.render_title_card_roles(role, cx))
+            .when(!self.title_card_at_playhead(index), |panel| {
+                panel.child(
+                    ui::EditorButton::plain(&theme, "preview-title-card")
+                        .outlined(&theme)
+                        .left_icon("icons/image.svg")
+                        .label(tr::editor::cover_templates::preview_card())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.show_cover_on_canvas(index, cx);
+                        })),
+                )
+            })
             .child(
                 ui::Field::stacked(&theme, tr::editor::title_cards::background()).child(
                     div()
@@ -1140,6 +1294,7 @@ impl EditorWindow {
                 div()
                     .flex()
                     .items_center()
+                    .flex_wrap()
                     .gap(px(6.))
                     .child(
                         ui::EditorButton::plain(&theme, "title-card-export-png")
@@ -1210,7 +1365,7 @@ impl EditorWindow {
                                     cx,
                                     |project| project.remove_title_card(role),
                                 ) {
-                                    this.set_selection(None, cx);
+                                    this.browse_title_card(role, window, cx);
                                 }
                             })),
                     ),
