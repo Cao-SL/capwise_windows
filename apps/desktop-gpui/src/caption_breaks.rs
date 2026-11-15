@@ -251,6 +251,11 @@ impl crate::editor_window::EditorWindow {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
+        if self.sidebar.caption_review.running
+            || (automatic && self.caption_optimization_will_reflow())
+        {
+            return;
+        }
         let Some(captions) = self.project.captions.as_ref() else {
             return;
         };

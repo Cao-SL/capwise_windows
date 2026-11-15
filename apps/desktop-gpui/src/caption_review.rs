@@ -1222,6 +1222,21 @@ fn apply_changes(
 }
 
 impl EditorWindow {
+    pub(crate) fn caption_optimization_will_reflow(&self) -> bool {
+        processing(&self.project_path)
+            .ok()
+            .flatten()
+            .is_some_and(|request| {
+                request.review
+                    && matches!(
+                        request.status,
+                        ProcessingStatus::AwaitingSave
+                            | ProcessingStatus::Queued
+                            | ProcessingStatus::Reviewing,
+                    )
+            })
+    }
+
     fn read_caption_processing(
         &mut self,
         cx: &mut Context<Self>,
@@ -2028,6 +2043,7 @@ impl EditorWindow {
     fn start_caption_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = crate::transcription::ui_snapshot(&self.project_path);
         if self.sidebar.caption_review.running
+            || self.sidebar.caption_resplit.running
             || self.sidebar.caption_translation.is_running()
             || state.generating
             || state.refining
