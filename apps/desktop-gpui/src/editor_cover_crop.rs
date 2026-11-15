@@ -59,6 +59,10 @@ fn resize_grab_offset(bounds: CropBounds, handle: Handle, pointer: Vec2) -> Vec2
     )
 }
 
+fn has_area(bounds: CropBounds) -> bool {
+    bounds.width > 0. && bounds.height > 0.
+}
+
 impl CoverCrop {
     fn reset(&mut self) {
         let size = self.state.box_size;
@@ -117,6 +121,7 @@ impl CoverCrop {
                     .set_raw(editor_crop::move_bounds(bounds, Some(x), Some(y)));
             }
             Some(CropDrag::Handle(_) | CropDrag::Overlay { .. }) => {
+                let previous = self.state.raw;
                 let offset = self.resize_grab_offset;
                 self.state.resize_move(
                     Vec2::new(point.x - offset.x, point.y - offset.y),
@@ -124,6 +129,9 @@ impl CoverCrop {
                     event.modifiers.shift,
                     false,
                 );
+                if !has_area(self.state.real()) {
+                    self.state.set_raw(previous);
+                }
             }
             None => {}
         }
@@ -189,6 +197,17 @@ impl EditorWindow {
     }
 
     fn close_cover_image_crop(&mut self, apply: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if apply
+            && self
+                .sidebar
+                .title_cards
+                .layers
+                .crop
+                .as_ref()
+                .is_some_and(|crop| !has_area(crop.state.real()))
+        {
+            return;
+        }
         let Some(crop) = self.sidebar.title_cards.layers.crop.take() else {
             return;
         };

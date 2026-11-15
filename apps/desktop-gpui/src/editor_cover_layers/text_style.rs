@@ -13,7 +13,7 @@ pub(crate) struct CoverTextDialog {
     pub(crate) card: usize,
     pub(crate) layer: usize,
     draft: CoverLayer,
-    focus: gpui::FocusHandle,
+    pub(crate) focus: gpui::FocusHandle,
     tab_end: gpui::FocusHandle,
     return_focus: Option<gpui::FocusHandle>,
 }
@@ -61,7 +61,7 @@ impl EditorWindow {
             layer,
             draft,
             focus,
-            tab_end: cx.focus_handle(),
+            tab_end: cx.focus_handle().tab_stop(true),
             return_focus,
         });
         cx.notify();
@@ -148,7 +148,9 @@ impl EditorWindow {
                         dialog.focus.focus(window, cx);
                     }
                     window.focus_next(cx);
-                    if dialog.tab_end.is_focused(window) {
+                    if dialog.tab_end.is_focused(window)
+                        || !dialog.focus.contains_focused(window, cx)
+                    {
                         dialog.focus.focus(window, cx);
                         window.focus_next(cx);
                     }

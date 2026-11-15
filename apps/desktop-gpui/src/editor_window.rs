@@ -2534,7 +2534,12 @@ impl EditorWindow {
     /// Where focus goes when a menu opens or a field commits: the root, so the
     /// window's own key handling (and the menu's arrows) resume.
     pub(crate) fn focus_handle_for_menu(&self) -> FocusHandle {
-        self.focus.clone()
+        self.sidebar
+            .title_cards
+            .layers
+            .text_dialog
+            .as_ref()
+            .map_or_else(|| self.focus.clone(), |dialog| dialog.focus.clone())
     }
 
     pub fn focus_root(&self, window: &mut Window, cx: &mut Context<Self>) {
