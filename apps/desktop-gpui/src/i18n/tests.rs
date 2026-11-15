@@ -17,6 +17,7 @@ const CAPWISE_KEYS: &[&str] = &[
     "dialog.teleprompter.follow.",
     "editor.assets.",
     "editor.cover.",
+    "editor.cover_controls.",
     "editor.cover_templates.",
     "editor.review.",
     "editor.setup.",
