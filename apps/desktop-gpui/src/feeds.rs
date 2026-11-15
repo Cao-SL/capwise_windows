@@ -1531,10 +1531,35 @@ impl Feeds {
             latest: latest.clone(),
             wake,
         };
+        let executor = cx.background_executor().clone();
         let meter = cx.background_executor().spawn(async move {
+            let stale_after = Duration::from_millis(250);
             while let Ok(samples) = meter_rx.recv_async().await {
-                sender.push(Instant::now(), db_fs(&samples));
+                let mut last_sample = Instant::now();
+                sender.push(last_sample, db_fs(&samples));
+                loop {
+                    let deadline = executor.timer(stale_after);
+                    tokio::pin!(deadline);
+                    loop {
+                        tokio::select! {
+                            sample = meter_rx.recv_async() => {
+                                let Ok(samples) = sample else {
+                                    sender.clear();
+                                    return;
+                                };
+                                last_sample = Instant::now();
+                                sender.push(last_sample, db_fs(&samples));
+                            }
+                            () = &mut deadline => break,
+                        }
+                    }
+                    if last_sample.elapsed() >= stale_after {
+                        sender.clear();
+                        break;
+                    }
+                }
             }
+            sender.clear();
         });
         let pump = cx.spawn(async move |this, cx| {
             let _meter = meter;
@@ -1666,7 +1691,15 @@ impl MeterSender {
         let Some(level) = self.window.push(now, db) else {
             return;
         };
-        let level = level.max(METER_FLOOR_DB);
+        self.publish(level.max(METER_FLOOR_DB));
+    }
+
+    fn clear(&mut self) {
+        self.window = MeterWindow::default();
+        self.publish(METER_FLOOR_DB);
+    }
+
+    fn publish(&self, level: f64) {
         self.latest.store(level.to_bits(), Ordering::Release);
         if level.to_bits() != self.shown.load(Ordering::Acquire) {
             let _ = self.wake.try_send(());
@@ -1864,6 +1897,32 @@ mod tests {
             sender.push(at(callback), -30.0);
         }
         assert!(wakes.try_recv().is_err());
+    }
+
+    #[test]
+    fn clearing_the_meter_drops_its_peak_and_wakes_the_display() {
+        let shown = Arc::new(AtomicU64::new((-12.0f64).to_bits()));
+        let latest = Arc::new(AtomicU64::new((-12.0f64).to_bits()));
+        let (wake, wakes) = flume::bounded(1);
+        let mut sender = MeterSender {
+            window: MeterWindow::default(),
+            shown,
+            latest: latest.clone(),
+            wake,
+        };
+        let now = Instant::now();
+        sender.push(now, -12.0);
+        assert!(wakes.try_recv().is_err());
+
+        sender.clear();
+        assert_eq!(wakes.try_recv(), Ok(()));
+        assert_eq!(
+            f64::from_bits(latest.load(Ordering::Acquire)),
+            METER_FLOOR_DB
+        );
+
+        sender.push(now, -30.0);
+        assert_eq!(f64::from_bits(latest.load(Ordering::Acquire)), -30.0);
     }
 
     #[test]

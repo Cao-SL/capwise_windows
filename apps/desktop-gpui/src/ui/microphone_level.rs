@@ -5,7 +5,7 @@ use gpui::{
 
 use crate::feeds::{self, Feeds, MicLevel};
 
-const RECORDING_BAR_TRACK_WIDTH: f32 = 20.;
+const RECORDING_METER_HEIGHT: f32 = 16.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MicrophoneLevelKind {
@@ -26,12 +26,12 @@ impl MicrophoneLevelKind {
         }
     }
 
-    /// An upper bound on the fill's drawn width, in device pixels. The main
+    /// An upper bound on the fill's drawn extent, in device pixels. The main
     /// window meters are never wider than the window itself.
     fn span(self, viewport_width: f32, scale: f32) -> f32 {
         match self {
             Self::CaptureButton | Self::DeviceRow | Self::Voiceover => viewport_width * scale,
-            Self::RecordingBar => RECORDING_BAR_TRACK_WIDTH * scale,
+            Self::RecordingBar => RECORDING_METER_HEIGHT * scale,
         }
     }
 
@@ -210,24 +210,33 @@ impl Render for MicrophoneLevel {
                     )
                     .child(div().text_size(px(12.)).child(label))
             }
-            MicrophoneLevelKind::RecordingBar => div()
-                .absolute()
-                .bottom(px(4.))
-                .left(px(4.))
-                .right(px(4.))
-                .h(px(2.))
-                .rounded_full()
-                .overflow_hidden()
-                .bg(self.track)
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(gpui::relative(self.fill))
-                        .bg(self.color),
-                ),
+            MicrophoneLevelKind::RecordingBar => {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .h(px(RECORDING_METER_HEIGHT))
+                    .children([6., 11., RECORDING_METER_HEIGHT, 11., 6.].into_iter().map(
+                        |height| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .justify_end()
+                                .w(px(2.))
+                                .h(px(height))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(self.track)
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .h(gpui::relative(self.fill))
+                                        .rounded_full()
+                                        .bg(self.color),
+                                )
+                        },
+                    ))
+            }
         }
     }
 }
@@ -297,15 +306,15 @@ mod tests {
     }
 
     #[test]
-    fn the_recording_bar_repaints_per_device_pixel_of_its_track() {
+    fn the_recording_meter_repaints_per_device_pixel_of_its_height() {
         let kind = MicrophoneLevelKind::RecordingBar;
         assert!(!px_moved(kind, -30., -30.5, kind.span(0., 2.)));
         assert!(px_moved(kind, -30., -32., kind.span(0., 2.)));
         assert!(!px_moved(kind, -30., -31., kind.span(0., 1.)));
         assert!(px_moved(kind, -30., -33., kind.span(0., 1.)));
         assert_eq!(kind.fill(-96.) * kind.span(0., 2.), 0.);
-        assert_eq!(kind.fill(0.) * kind.span(0., 1.), 20.);
-        assert_eq!(kind.fill(0.) * kind.span(0., 2.), 40.);
+        assert_eq!(kind.fill(0.) * kind.span(0., 1.), 16.);
+        assert_eq!(kind.fill(0.) * kind.span(0., 2.), 32.);
     }
 
     #[test]

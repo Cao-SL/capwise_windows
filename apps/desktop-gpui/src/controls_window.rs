@@ -396,13 +396,18 @@ impl ControlsWindow {
         let can_mute = session.mode() == Some(RecordingMode::Instant)
             && session.has_microphone()
             && matches!(session.phase, Phase::Recording { .. });
+        let meter_active = session.has_microphone()
+            && !muted
+            && matches!(session.phase, Phase::Recording { paused: false });
+        let mic_tooltip = if !self.has_microphone {
+            tr::main::device::no_microphone()
+        } else if meter_active {
+            tr::editor::voiceover::input_level()
+        } else {
+            tr::main::device::microphone()
+        };
         self.level_bar.update(cx, |bar, cx| {
-            bar.configure(
-                self.has_microphone && !muted,
-                theme.blue_9.into(),
-                theme.gray_10.into(),
-                cx,
-            );
+            bar.configure(meter_active, theme.blue_9.into(), theme.gray_10.into(), cx);
         });
 
         let icon = if !self.has_microphone || muted {
@@ -421,13 +426,14 @@ impl ControlsWindow {
 
         div()
             .id("microphone")
-            .w(px(28.))
+            .w(px(if self.has_microphone { 50. } else { 28. }))
             .h(px(32.))
             .flex_shrink_0()
-            .relative()
             .flex()
             .items_center()
             .justify_center()
+            .gap(px(4.))
+            .tooltip(move |_, cx| ui::Tooltip::new(&theme, mic_tooltip).view(cx))
             .when(can_mute, |this| {
                 this.rounded(px(8.))
                     .hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.06)))
@@ -438,7 +444,7 @@ impl ControlsWindow {
                     }))
             })
             .child(svg().path(icon).size(px(20.)).text_color(icon_color))
-            .when(self.has_microphone && !muted, |this| {
+            .when(self.has_microphone, |this| {
                 this.child(self.level_bar.clone())
             })
     }
