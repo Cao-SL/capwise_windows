@@ -3354,6 +3354,16 @@ warning_footer = "リソースが不足すると書き出しに失敗する場�
 disk_stop = "{drive}の空き容量が残り {free} GiB のため、書き出しを停止しました。空き容量を増やして再試行してください。元の録画は保持されています。"
 memory_stop = "深刻なメモリ圧力が続いたため、書き出しを停止しました。ほかのアプリを閉じるか解像度を下げて再試行してください。元の録画は保持されています。"
 
+[editor.cover_controls]
+lock = "ロック"
+unlock = "ロック解除"
+custom = "カスタム"
+font_size = "文字サイズ"
+text_color = "文字色"
+stroke_width = "縁取りの太さ"
+stroke_color = "縁取りの色"
+apply = "適用"
+
 [editor.title_cards]
 export_cover = "表紙をPNGで書き出す"
 export_image = "画像をPNGで書き出す"

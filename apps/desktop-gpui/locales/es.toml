@@ -3354,6 +3354,16 @@ warning_footer = "La exportación puede fallar si se agotan los recursos. Se sup
 disk_stop = "La exportación se ha detenido porque en {drive} solo quedan {free} GiB disponibles. Libera espacio y vuelve a intentarlo. Tu grabación original se ha conservado."
 memory_stop = "La exportación se ha detenido porque la presión de memoria sigue siendo crítica. Cierra otras aplicaciones o reduce la resolución y vuelve a intentarlo. Tu grabación original se ha conservado."
 
+[editor.cover_controls]
+lock = "Bloquear"
+unlock = "Desbloquear"
+custom = "Personalizar"
+font_size = "Tamaño del texto"
+text_color = "Color del texto"
+stroke_width = "Grosor del contorno"
+stroke_color = "Color del contorno"
+apply = "Aplicar"
+
 [editor.title_cards]
 export_cover = "Exportar portada PNG"
 export_image = "Exportar imagen PNG"

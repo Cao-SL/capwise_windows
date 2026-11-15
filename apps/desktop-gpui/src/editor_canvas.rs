@@ -50,7 +50,8 @@ use cap_rendering::{CaptionFrameBox, FrameLayout};
 use gpui::{
     AnyElement, AppContext as _, Bounds, Context, CursorStyle, FontWeight, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
-    Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    prelude::FluentBuilder, px,
 };
 
 /// `NormRect` (`snapping.ts:6`): normalised against the output frame.
@@ -864,6 +865,10 @@ impl EditorWindow {
                 self.set_selection(None, cx);
             }
             self.canvas_selection = Some(element);
+        }
+        if event.click_count == 2 && self.is_cover_picture(element) {
+            self.open_cover_image_crop(element, window, cx);
+            return;
         }
         if event.click_count == 2
             && let CanvasSelection::Text(index) = element
@@ -2109,7 +2114,9 @@ impl EditorWindow {
             .canvas_drag
             .as_ref()
             .is_some_and(|drag| drag.element == element);
-        let show = selected || hovered || dragging;
+        let picture = self.is_cover_picture(element);
+        let cover_locked = self.cover_element_locked(element);
+        let show = !cover_locked && (selected || hovered || dragging);
         let (draggable, resizable, locked_message) = match element {
             CanvasSelection::Display => (
                 self.display_draggable(),
@@ -2155,7 +2162,7 @@ impl EditorWindow {
             .h(px(height))
             .cursor(if element == CanvasSelection::Captions {
                 CursorStyle::IBeam
-            } else if draggable {
+            } else if draggable && !cover_locked {
                 CursorStyle::OpenHand
             } else {
                 CursorStyle::Arrow
@@ -2168,19 +2175,28 @@ impl EditorWindow {
                     .border_2()
                     .border_color(border),
             )
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                this.set_canvas_hover(element, *hovered, cx);
-            }))
-            // Boxes overlap -- a mask sits on the display -- and gpui runs
-            // every containing sibling's listener topmost-first, so without
-            // the stop the display would hijack the drag one event later.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.begin_canvas_move(element, event, window, cx);
-                }),
-            );
+            .when(!cover_locked, |element_box| {
+                element_box
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        this.set_canvas_hover(element, *hovered, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.begin_canvas_move(element, event, window, cx);
+                        }),
+                    )
+            })
+            .when(picture, |element_box| {
+                element_box.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_cover_layer_menu(element, event.position, cx);
+                    }),
+                )
+            });
 
         // The caption is drawn over every other element, so its box takes the
         // pointer from the boxes under it; otherwise the screen box under it

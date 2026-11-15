@@ -886,7 +886,7 @@ impl ImageLayer {
         &mut self,
         constants: &RenderVideoConstants,
         output: (u32, u32),
-        layers: &[(u32, String, cap_project::LayerPose, bool)],
+        layers: &[(u32, String, cap_project::LayerPose, bool, Option<[f32; 4]>)],
     ) {
         self.draws.clear();
         self.draw_tracks.clear();
@@ -915,7 +915,7 @@ impl ImageLayer {
             .map(|(path, _)| path.clone())
             .collect();
         self.cache.retain(|cached, _| keep.contains(cached));
-        for ((track, _, pose, mirror), resolved) in layers.iter().zip(resolved) {
+        for ((track, _, pose, mirror, crop), resolved) in layers.iter().zip(resolved) {
             let Some((path, version)) = resolved else {
                 tracing::warn!("Cover layer image is missing or outside the project");
                 continue;
@@ -926,7 +926,10 @@ impl ImageLayer {
             else {
                 continue;
             };
-            if let Some(uniforms) = posed_uniforms(pose, output, *mirror) {
+            if let Some(mut uniforms) = posed_uniforms(pose, output, *mirror) {
+                if let Some(crop) = crop {
+                    uniforms.uv_rect = *crop;
+                }
                 self.push_draw_with_track(&constants.device, &texture, uniforms, *track);
             }
         }

@@ -1310,6 +1310,7 @@ pub enum SidebarMenu {
     /// `KSelect`: it lists every installed family, so it filters as you type.
     /// See the README's font-picker deviation.
     TextFontFamily(usize),
+    CoverFontFamily(usize, usize),
     TextWeight(usize),
     Camera3DEasing(usize),
 }
@@ -1429,6 +1430,7 @@ impl EditorWindow {
                 .map(|(weight, label)| ui::MenuItem::new(label(), *weight == keyboard.font_weight))
                 .collect(),
             SidebarMenu::TextFontFamily(index)
+            | SidebarMenu::CoverFontFamily(index, _)
             | SidebarMenu::TextWeight(index)
             | SidebarMenu::Camera3DEasing(index) => self.panel_menu_items(kind, index),
         }
@@ -1695,6 +1697,7 @@ impl EditorWindow {
                 });
             }
             SidebarMenu::TextFontFamily(segment)
+            | SidebarMenu::CoverFontFamily(segment, _)
             | SidebarMenu::TextWeight(segment)
             | SidebarMenu::Camera3DEasing(segment) => {
                 self.choose_panel_menu(kind, segment, index, window, cx)

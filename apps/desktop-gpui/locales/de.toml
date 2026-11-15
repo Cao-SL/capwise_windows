@@ -3354,6 +3354,16 @@ warning_footer = "Wenn Ressourcen ausgehen, kann der Export fehlschlagen. Die Re
 disk_stop = "Der Export wurde gestoppt, da auf {drive} nur noch {free} GiB verfügbar sind. Gib Speicherplatz frei und versuche es erneut. Deine Originalaufnahme wurde aufbewahrt."
 memory_stop = "Der Export wurde wegen anhaltend kritischen Speicherdrucks gestoppt. Schließe andere Anwendungen oder wähle eine niedrigere Exportauflösung und versuche es erneut. Deine Originalaufnahme wurde aufbewahrt."
 
+[editor.cover_controls]
+lock = "Sperren"
+unlock = "Entsperren"
+custom = "Anpassen"
+font_size = "Schriftgröße"
+text_color = "Textfarbe"
+stroke_width = "Konturstärke"
+stroke_color = "Konturfarbe"
+apply = "Anwenden"
+
 [editor.title_cards]
 export_cover = "Cover als PNG exportieren"
 export_image = "Bild als PNG exportieren"

@@ -48,6 +48,7 @@ mod editor_canvas;
 mod editor_clips;
 mod editor_color;
 mod editor_cover;
+mod editor_cover_crop;
 mod editor_cover_layers;
 mod editor_crop;
 mod editor_edits;

@@ -3739,6 +3739,16 @@ setup_required = "Finish the recording setup before waiting for captions."
 not_started = "Caption processing did not start. Check its settings or export the current version."
 project_changed = "The project changed while preparing the export. Start export again to use the latest version."
 
+[editor.cover_controls]
+lock = "Lock"
+unlock = "Unlock"
+custom = "Custom"
+font_size = "Font size"
+text_color = "Text color"
+stroke_width = "Stroke width"
+stroke_color = "Stroke color"
+apply = "Apply"
+
 [editor.title_cards]
 add = "Add elements"
 add_text = "Text"

@@ -3354,6 +3354,16 @@ warning_footer = "L’exportation peut échouer si les ressources sont épuisée
 disk_stop = "L’exportation s’est arrêtée car il ne reste que {free} Gio sur {drive}. Libérez de l’espace et réessayez. Votre enregistrement original a été conservé."
 memory_stop = "L’exportation s’est arrêtée car la pression mémoire reste critique. Fermez les autres applications ou réduisez la résolution, puis réessayez. Votre enregistrement original a été conservé."
 
+[editor.cover_controls]
+lock = "Verrouiller"
+unlock = "Déverrouiller"
+custom = "Personnaliser"
+font_size = "Taille du texte"
+text_color = "Couleur du texte"
+stroke_width = "Épaisseur du contour"
+stroke_color = "Couleur du contour"
+apply = "Appliquer"
+
 [editor.title_cards]
 export_cover = "Exporter la couverture PNG"
 export_image = "Exporter l’image PNG"

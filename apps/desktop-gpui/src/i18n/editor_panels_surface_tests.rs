@@ -468,6 +468,11 @@ fn editor_panels_match_the_literals_they_replaced() {
             "Use a Camera Only scene. Padding reveals the background around the camera.",
         ),
         (tr::editor::sidebar::tab::background(), "Frame"),
+        (tr::editor::sidebar::tab::frame_background(), "Background"),
+        (
+            tr::editor::sidebar::tab::no_camera(),
+            "This recording has no camera footage.",
+        ),
         (tr::editor::sidebar::tab::camera(), "Camera"),
         (tr::editor::sidebar::tab::audio(), "Audio"),
         (tr::editor::sidebar::tab::cursor(), "Cursor"),

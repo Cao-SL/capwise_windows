@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use cap_project::{CoverLayer, CoverLayerKind, CoverPersonaRef, CoverTextStyle, LayerPose, XY};
 use gpui::{
     AnyElement, AppContext as _, AsyncWindowContext, Context, Hsla, InteractiveElement,
-    IntoElement, ParentElement, StatefulInteractiveElement, Styled, StyledImage, Window, div, img,
-    prelude::FluentBuilder, px, rgb,
+    IntoElement, ParentElement, Pixels, Point, StatefulInteractiveElement, Styled, StyledImage,
+    Window, div, img, prelude::FluentBuilder, px, rgb,
 };
 
 use crate::{
@@ -42,6 +42,9 @@ pub(crate) struct CoverLayerUi {
     /// The persona grid is open to add a person as a layer.
     adding_person: Option<String>,
     busy: bool,
+    custom_text: bool,
+    pub(crate) crop: Option<crate::editor_cover_crop::CoverCrop>,
+    pub(crate) menu: Option<(CanvasSelection, ui::MenuState)>,
     /// Pixel sizes of placed people, read once from their files.
     sizes: std::cell::RefCell<std::collections::HashMap<String, Option<(u32, u32)>>>,
 }
@@ -137,6 +140,102 @@ impl EditorWindow {
         elements
     }
 
+    pub(crate) fn cover_layer(&self, index: usize, layer: usize) -> Option<&CoverLayer> {
+        self.cover_card(index)?
+            .title_card
+            .as_ref()?
+            .layers
+            .get(layer)
+    }
+
+    pub(crate) fn is_cover_picture(&self, element: CanvasSelection) -> bool {
+        match element {
+            CanvasSelection::CoverLayer(index, layer) => self
+                .cover_layer(index, layer)
+                .is_some_and(|item| matches!(item.kind, CoverLayerKind::Image { .. })),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn cover_element_locked(&self, element: CanvasSelection) -> bool {
+        match element {
+            CanvasSelection::CoverLayer(index, layer) => self
+                .cover_layer(index, layer)
+                .is_some_and(|item| item.locked),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn open_cover_layer_menu(
+        &mut self,
+        element: CanvasSelection,
+        point: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let items = self.cover_layer_menu_items(element);
+        self.sidebar.title_cards.layers.menu = Some((element, ui::MenuState::new(point, &items)));
+        cx.notify();
+    }
+
+    fn cover_layer_menu_items(&self, element: CanvasSelection) -> Vec<ui::MenuItem> {
+        if self.cover_element_locked(element) {
+            return vec![ui::MenuItem::new(
+                tr::editor::cover_controls::unlock(),
+                false,
+            )];
+        }
+        vec![
+            ui::MenuItem::new(tr::editor::crop::title(), false),
+            ui::MenuItem::new(tr::editor::cover_controls::lock(), false),
+        ]
+    }
+
+    pub(crate) fn render_cover_layer_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (element, state) = self.sidebar.title_cards.layers.menu.as_ref()?;
+        let element = *element;
+        let locked = self.cover_element_locked(element);
+        self.is_cover_picture(element).then(|| {
+            ui::Menu::editor(
+                &self.theme,
+                "cover-layer-menu",
+                self.cover_layer_menu_items(element),
+                state,
+            )
+            .on_select(cx.listener(move |this, choice, window, cx| {
+                this.sidebar.title_cards.layers.menu = None;
+                if !locked && *choice == 0 {
+                    this.open_cover_image_crop(element, window, cx);
+                } else {
+                    this.toggle_cover_lock(element, window, cx);
+                }
+                cx.notify();
+            }))
+            .on_dismiss(cx.listener(|this, _, _, cx| {
+                this.sidebar.title_cards.layers.menu = None;
+                cx.notify();
+            }))
+            .into_any_element()
+        })
+    }
+
+    fn toggle_cover_lock(
+        &mut self,
+        element: CanvasSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let CanvasSelection::CoverLayer(index, layer) = element
+            && self.is_cover_picture(element)
+        {
+            self.edit_cover_layer(index, layer, window, cx, |layers, layer| {
+                layers[layer].locked = !layers[layer].locked;
+            });
+            if self.cover_element_locked(element) && self.canvas_selection == Some(element) {
+                self.canvas_selection = None;
+            }
+        }
+    }
+
     /// People and pictures keep their shape when resized; text boxes do not.
     pub(crate) fn cover_keeps_shape(&self, element: CanvasSelection) -> bool {
         match element {
@@ -194,9 +293,10 @@ impl EditorWindow {
         center: XY<f64>,
         size: XY<f64>,
     ) -> bool {
-        if ![center.x, center.y, size.x, size.y]
-            .iter()
-            .all(|value| value.is_finite())
+        if self.cover_element_locked(element)
+            || ![center.x, center.y, size.x, size.y]
+                .iter()
+                .all(|value| value.is_finite())
         {
             return false;
         }
@@ -606,7 +706,7 @@ impl EditorWindow {
         .detach();
     }
 
-    fn edit_cover_layer(
+    pub(crate) fn edit_cover_layer(
         &mut self,
         index: usize,
         layer: usize,
@@ -755,13 +855,17 @@ impl EditorWindow {
         let CanvasSelection::CoverLayer(index, layer) = element else {
             return div().into_any_element();
         };
-        let style = self
-            .cover_card(index)
-            .and_then(|segment| segment.title_card.as_ref()?.layers.get(layer))
-            .and_then(|item| item.kind.text_style());
+        let item = self.cover_layer(index, layer);
+        let style = item.and_then(|item| item.kind.text_style());
         let lines = edit.before.lines().count().max(1) as f32;
         let height = rect.h as f32 * canvas.1;
-        let font_size = (height / lines / 1.15 * 0.86).max(10.0);
+        let font_size = item
+            .and_then(|item| item.font_size)
+            .map_or(height / lines / 1.15 * 0.86, |size| {
+                size * canvas.1 / 1080.0
+            })
+            .min(height / lines / 1.15)
+            .max(10.0);
         let color = style
             .as_ref()
             .and_then(|style| u32::from_str_radix(style.color.trim_start_matches('#'), 16).ok())
@@ -814,7 +918,10 @@ impl EditorWindow {
         cx: &mut Context<Self>,
     ) -> bool {
         match self.canvas_selection {
-            Some(CanvasSelection::CoverLayer(index, layer)) => {
+            Some(element @ CanvasSelection::CoverLayer(index, layer)) => {
+                if self.cover_element_locked(element) {
+                    return true;
+                }
                 self.canvas_selection = None;
                 self.edit_cover_layer(index, layer, window, cx, |layers, layer| {
                     layers.remove(layer);
@@ -1066,6 +1173,7 @@ impl EditorWindow {
                             .height(px(28.))
                             .text_size(px(12.))
                             .label(short)
+                            .when(item.locked, |pill| pill.left_icon("icons/lock.svg"))
                             .tooltip(&theme, label.to_owned())
                             .pressed(selected_index == Some(layer))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1111,6 +1219,20 @@ impl EditorWindow {
             .p(px(10.))
             .rounded(px(8.))
             .bg(Hsla::from(theme.editor.ctl));
+        let element = CanvasSelection::CoverLayer(index, layer);
+        if item.locked {
+            return body
+                .child(
+                    ui::EditorButton::plain(&theme, "cover-unlock")
+                        .outlined(&theme)
+                        .left_icon("icons/lock-open.svg")
+                        .label(tr::editor::cover_controls::unlock())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.toggle_cover_lock(element, window, cx);
+                        })),
+                )
+                .into_any_element();
+        }
         if let Some(style) = item.kind.text_style() {
             let field = if matches!(item.kind, CoverLayerKind::Title { .. }) {
                 FieldKey::TextContent(index)
@@ -1126,7 +1248,8 @@ impl EditorWindow {
                 .map(|(slot, (fill, outline, back))| {
                     let current = style.color == *fill
                         && style.stroke.as_deref() == *outline
-                        && style.band.as_deref() == *back;
+                        && style.band.as_deref() == *back
+                        && item.stroke_width.is_none();
                     let (fill, outline, back) = (*fill, *outline, *back);
                     let font = style.font.clone();
                     div()
@@ -1163,6 +1286,7 @@ impl EditorWindow {
                                 cx,
                                 move |layers, layer| {
                                     layers[layer].kind.set_text_style(next);
+                                    layers[layer].stroke_width = None;
                                 },
                             );
                         }))
@@ -1195,6 +1319,62 @@ impl EditorWindow {
                 .child(self.render_field_input(field, Some(52.)))
                 .child(div().flex().gap(px(6.)).children(styles))
                 .child(div().flex().flex_wrap().gap(px(6.)).children(fonts));
+            let custom = self.sidebar.title_cards.layers.custom_text;
+            body = body.child(
+                ui::EditorButton::plain(&theme, "cover-custom-text")
+                    .outlined(&theme)
+                    .pressed(custom)
+                    .label(tr::editor::cover_controls::custom())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sidebar.title_cards.layers.custom_text =
+                            !this.sidebar.title_cards.layers.custom_text;
+                        cx.notify();
+                    })),
+            );
+            if custom {
+                use crate::editor_sidebar::ColorTarget;
+                body = body
+                    .child(self.menu_select_owned(
+                        crate::editor_tabs::SidebarMenu::CoverFontFamily(index, layer),
+                        "cover-custom-font".into(),
+                        crate::editor_panels::font_family_label(&current_font).into(),
+                        cx,
+                    ))
+                    .child(
+                        ui::Field::stacked(&theme, tr::editor::cover_controls::font_size()).child(
+                            self.render_number_field(
+                                FieldKey::CoverTextSize(index, layer),
+                                "px",
+                                76.,
+                            ),
+                        ),
+                    )
+                    .child(
+                        ui::Field::stacked(&theme, tr::editor::cover_controls::text_color()).child(
+                            self.render_color_input(
+                                ColorTarget::CoverText(index, layer),
+                                &style.color,
+                                cx,
+                            ),
+                        ),
+                    )
+                    .child(
+                        ui::Field::stacked(&theme, tr::editor::cover_controls::stroke_width())
+                            .child(self.render_number_field(
+                                FieldKey::CoverStrokeWidth(index, layer),
+                                "px",
+                                76.,
+                            )),
+                    )
+                    .child(
+                        ui::Field::stacked(&theme, tr::editor::cover_controls::stroke_color())
+                            .child(self.render_color_input(
+                                ColorTarget::CoverStroke(index, layer),
+                                style.stroke.as_deref().unwrap_or("#111111"),
+                                cx,
+                            )),
+                    );
+            }
         }
         if let CoverLayerKind::Image {
             persona: Some(reference),
@@ -1270,6 +1450,26 @@ impl EditorWindow {
         };
         let mut actions = div().flex().gap(px(6.));
         if matches!(item.kind, CoverLayerKind::Image { .. }) {
+            body = body.child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .child(
+                        small("cover-layer-crop", tr::editor::crop::title()).on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.open_cover_image_crop(element, window, cx)
+                            },
+                        )),
+                    )
+                    .child(
+                        small("cover-layer-lock", tr::editor::cover_controls::lock()).on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.toggle_cover_lock(element, window, cx)
+                            }),
+                        ),
+                    ),
+            );
+
             actions = actions.child(
                 small("cover-layer-flip", tr::editor::title_cards::layer_flip()).on_click(
                     cx.listener(move |this, _, window, cx| {

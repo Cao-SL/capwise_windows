@@ -569,6 +569,33 @@ fn cover_layers_are_optional_roundtrip_and_reject_unsafe_values() {
 }
 
 #[test]
+fn cover_image_crop_and_lock_round_trip_with_custom_text_sizing() {
+    let segment = card(TitleCardRole::Intro, 2.0);
+    let mut data = value(&segment);
+    let pose = json!({"center": {"x": 0.5, "y": 0.5}, "size": {"x": 0.4, "y": 0.2}, "rotation": 0.0, "opacity": 1.0});
+    data["titleCard"]["layers"] = json!([
+        {"id": "portrait", "pose": pose, "kind": {"type":"image", "path":"content/images/p.png"},
+         "locked": true, "imageCrop": [0.25, 0.0625, 0.5, 0.25]},
+        {"id": "words", "pose": pose, "kind": {"type":"text", "content":"Office", "color":"#FFFFFF", "stroke":"#111111"},
+         "fontSize": 92.0, "strokeWidth": 3.0}
+    ]);
+    let reopened: TextSegment = serde_json::from_value(data.clone()).unwrap();
+    let layers = &reopened.title_card.as_ref().unwrap().layers;
+    assert!(layers[0].locked);
+    assert_eq!(layers[0].image_crop, Some([0.25, 0.0625, 0.5, 0.25]));
+    assert_eq!(layers[1].font_size, Some(92.));
+    assert_eq!(layers[1].stroke_width, Some(3.));
+    let encoded = value(&reopened);
+    assert_eq!(
+        serde_json::from_value::<TextSegment>(encoded).unwrap(),
+        reopened
+    );
+
+    data["titleCard"]["layers"][0]["imageCrop"] = json!([0.8, 0.0, 0.5, 1.0]);
+    assert!(serde_json::from_value::<TextSegment>(data).is_err());
+}
+
+#[test]
 fn a_card_has_at_most_one_title_layer_and_v1_layers_still_read() {
     let segment = card(TitleCardRole::Intro, 2.0);
     let pose = json!({"center": {"x": 0.5, "y": 0.5}, "size": {"x": 0.5, "y": 0.2}});

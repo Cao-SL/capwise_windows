@@ -127,9 +127,13 @@ impl TitleCardLayer {
             .iter()
             .enumerate()
             .filter_map(|(z, layer)| match &layer.kind {
-                CoverLayerKind::Image { path, mirror, .. } => {
-                    Some((z as u32 + 1, path.clone(), layer.pose, *mirror))
-                }
+                CoverLayerKind::Image { path, mirror, .. } => Some((
+                    z as u32 + 1,
+                    path.clone(),
+                    layer.pose,
+                    *mirror,
+                    layer.image_crop,
+                )),
                 _ => None,
             })
             .collect();
@@ -395,7 +399,12 @@ impl TitleCardLayer {
             color: parse_color(color),
             background_color: band.as_deref().map(parse_color),
             font_family: style.font.clone().unwrap_or_else(|| "Noto Sans SC".into()),
-            font_size: (height / (lines * line_height)).clamp(4.0, 2000.0),
+            font_size: layer
+                .font_size
+                .map_or(height / (lines * line_height), |size| {
+                    size * output.1 as f32 / 1080.0
+                })
+                .clamp(4.0, 2000.0),
             font_weight: 900.0,
             italic: false,
             opacity: pose.opacity.clamp(0.0, 1.0),
@@ -418,9 +427,13 @@ impl TitleCardLayer {
             text.font_size = (text.font_size * 0.92).max(4.0);
             measured = self.text.measure_exact(&text);
         }
+        let stroke_width = layer.stroke_width.map_or(text.font_size * 0.09, |width| {
+            width * output.1 as f32 / 1080.0
+        });
         text.stroke = stroke
             .as_deref()
-            .map(|color| (text.font_size * 0.09, parse_color(color)));
+            .filter(|_| stroke_width > 0.0)
+            .map(|color| (stroke_width, parse_color(color)));
         let top = center_y - measured.1 * 0.5;
         text.bounds = [bounds[0], top, bounds[2], top + measured.1];
         Some(text)

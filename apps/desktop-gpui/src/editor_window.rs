@@ -4375,6 +4375,10 @@ impl EditorWindow {
     /// (`useEditorShortcuts.ts:10`) and `e.repeat` is ignored there
     /// (`:42`) as `is_held` is here.
     fn on_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cover_crop_key(&event.keystroke.key, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if !self.visual_ready() {
             return;
         }
@@ -14270,6 +14274,7 @@ fn dismiss_indexed_sidebar_menu(menu: &mut Option<crate::editor_tabs::OpenMenu>)
 
     let indexed = menu.as_ref().is_some_and(|menu| match menu.kind {
         SidebarMenu::TextFontFamily(_)
+        | SidebarMenu::CoverFontFamily(..)
         | SidebarMenu::TextWeight(_)
         | SidebarMenu::Camera3DEasing(_) => true,
         SidebarMenu::BackgroundCornerStyle
@@ -14872,6 +14877,7 @@ impl Render for EditorWindow {
             .children(self.with_style_controls(|this| this.render_sidebar_menu(cx)))
             .children(self.render_toolbar_menu(cx))
             .children(self.render_text_menu(cx))
+            .children(self.render_cover_layer_menu(cx))
             .children(self.render_frame_controls(window, cx))
             .children(self.render_add_track_popover(window, cx))
             .children(self.render_sticker_picker(cx))
@@ -14906,6 +14912,7 @@ impl Render for EditorWindow {
             // Crop mode is a modal: it goes over everything, including the
             // menu above.
             .children(self.render_crop_dialog(cx))
+            .children(self.render_cover_image_crop(window, cx))
             // ...and its own pointer-capture stand-in over that, which is
             // `trackPointerSession`'s `setPointerCapture` + window listeners
             // (`Cropper.tsx:686-733`).

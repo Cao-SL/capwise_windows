@@ -1,42 +1,42 @@
 {
 	"version": 1,
-	"name": "汉服女生",
+	"name": "职场女生",
 	"name_en": "Mei",
 	"poses": [
 		{
-			"file": "hanfu-smile.webp",
+			"file": "blazer-smile.webp",
 			"expression": "smile",
-			"outfit": "hanfu",
+			"outfit": "blazer",
 			"facing": "left"
 		},
 		{
-			"file": "hanfu-surprise.webp",
+			"file": "blazer-surprise.webp",
 			"expression": "surprise",
-			"outfit": "hanfu",
+			"outfit": "blazer",
 			"facing": "left"
 		},
 		{
-			"file": "hanfu-think.webp",
+			"file": "blazer-think.webp",
 			"expression": "think",
-			"outfit": "hanfu",
+			"outfit": "blazer",
 			"facing": "left"
 		},
 		{
-			"file": "hanfu-point.webp",
+			"file": "blazer-point.webp",
 			"expression": "point",
-			"outfit": "hanfu",
+			"outfit": "blazer",
 			"facing": "left"
 		},
 		{
-			"file": "hanfu-confused.webp",
+			"file": "blazer-confused.webp",
 			"expression": "confused",
-			"outfit": "hanfu",
+			"outfit": "blazer",
 			"facing": "left"
 		},
 		{
-			"file": "hanfu-thumbsup.webp",
+			"file": "blazer-thumbsup.webp",
 			"expression": "thumbs_up",
-			"outfit": "hanfu",
+			"outfit": "blazer",
 			"facing": "left"
 		},
 		{
@@ -76,42 +76,6 @@
 			"facing": "left"
 		},
 		{
-			"file": "blazer-smile.webp",
-			"expression": "smile",
-			"outfit": "blazer",
-			"facing": "left"
-		},
-		{
-			"file": "blazer-surprise.webp",
-			"expression": "surprise",
-			"outfit": "blazer",
-			"facing": "left"
-		},
-		{
-			"file": "blazer-think.webp",
-			"expression": "think",
-			"outfit": "blazer",
-			"facing": "left"
-		},
-		{
-			"file": "blazer-point.webp",
-			"expression": "point",
-			"outfit": "blazer",
-			"facing": "left"
-		},
-		{
-			"file": "blazer-confused.webp",
-			"expression": "confused",
-			"outfit": "blazer",
-			"facing": "left"
-		},
-		{
-			"file": "blazer-thumbsup.webp",
-			"expression": "thumbs_up",
-			"outfit": "blazer",
-			"facing": "left"
-		},
-		{
 			"file": "denim-smile.webp",
 			"expression": "smile",
 			"outfit": "denim",
@@ -145,6 +109,42 @@
 			"file": "denim-thumbsup.webp",
 			"expression": "thumbs_up",
 			"outfit": "denim",
+			"facing": "left"
+		},
+		{
+			"file": "hanfu-smile.webp",
+			"expression": "smile",
+			"outfit": "hanfu",
+			"facing": "left"
+		},
+		{
+			"file": "hanfu-surprise.webp",
+			"expression": "surprise",
+			"outfit": "hanfu",
+			"facing": "left"
+		},
+		{
+			"file": "hanfu-think.webp",
+			"expression": "think",
+			"outfit": "hanfu",
+			"facing": "left"
+		},
+		{
+			"file": "hanfu-point.webp",
+			"expression": "point",
+			"outfit": "hanfu",
+			"facing": "left"
+		},
+		{
+			"file": "hanfu-confused.webp",
+			"expression": "confused",
+			"outfit": "hanfu",
+			"facing": "left"
+		},
+		{
+			"file": "hanfu-thumbsup.webp",
+			"expression": "thumbs_up",
+			"outfit": "hanfu",
 			"facing": "left"
 		}
 	],

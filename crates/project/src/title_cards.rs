@@ -97,6 +97,14 @@ pub struct CoverLayer {
     /// Centre and size normalised to the card; text fills its box.
     pub pose: LayerPose,
     pub kind: CoverLayerKind,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_crop: Option<[f32; 4]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_width: Option<f32>,
 }
 
 #[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -246,6 +254,10 @@ impl CoverLayer {
             id: uuid::Uuid::new_v4().simple().to_string(),
             pose,
             kind,
+            locked: false,
+            image_crop: None,
+            font_size: None,
+            stroke_width: None,
         }
     }
 
@@ -259,6 +271,21 @@ impl CoverLayer {
         valid_id(&self.id)
             && valid_pose(&self.pose)
             && style
+            && self
+                .font_size
+                .is_none_or(|size| (8.0..=400.0).contains(&size))
+            && self
+                .stroke_width
+                .is_none_or(|width| (0.0..=24.0).contains(&width))
+            && self.image_crop.is_none_or(|[x, y, width, height]| {
+                matches!(self.kind, CoverLayerKind::Image { .. })
+                    && (0.0..=1.0).contains(&x)
+                    && (0.0..=1.0).contains(&y)
+                    && width > 0.0
+                    && height > 0.0
+                    && x + width <= 1.000_001
+                    && y + height <= 1.000_001
+            })
             && match &self.kind {
                 CoverLayerKind::Title { .. } => true,
                 CoverLayerKind::Text { content, .. } => {

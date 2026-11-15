@@ -771,6 +771,8 @@ pub enum ColorTarget {
     TextColor(usize),
     TextBackground(usize),
     TitleCardBackground(usize),
+    CoverText(usize, usize),
+    CoverStroke(usize, usize),
     /// The outline colour, only reachable while `stroke_width > 0`.
     TextStroke(usize),
     /// The right-hand stop of the horizontal gradient, only reachable while
@@ -1958,6 +1960,14 @@ impl EditorWindow {
                     cap_project::TitleCardBackground::Solid { color } => Some(color.clone()),
                     cap_project::TitleCardBackground::ProjectImage { .. } => None,
                 }),
+            ColorTarget::CoverText(index, layer) => self
+                .cover_layer(index, layer)
+                .and_then(|item| item.kind.text_style())
+                .map(|style| style.color),
+            ColorTarget::CoverStroke(index, layer) => self
+                .cover_layer(index, layer)
+                .and_then(|item| item.kind.text_style())
+                .map(|style| style.stroke.unwrap_or("#111111".into())),
             ColorTarget::TextBackground(index) => self
                 .project
                 .timeline
@@ -2139,6 +2149,19 @@ impl EditorWindow {
                 self.update_title_card(index, window, cx, move |segment| {
                     segment.title_card.as_mut().unwrap().background =
                         cap_project::TitleCardBackground::Solid { color: hex };
+                });
+            }
+            ColorTarget::CoverText(index, layer) | ColorTarget::CoverStroke(index, layer) => {
+                self.edit_cover_layer(index, layer, window, cx, move |layers, layer| {
+                    let item = &mut layers[layer];
+                    if let Some(mut style) = item.kind.text_style() {
+                        if matches!(target, ColorTarget::CoverText(..)) {
+                            style.color = hex;
+                        } else {
+                            style.stroke = Some(hex);
+                        }
+                        item.kind.set_text_style(style);
+                    }
                 });
             }
             ColorTarget::TextBackground(index) => {
