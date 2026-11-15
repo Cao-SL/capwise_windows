@@ -567,3 +567,33 @@ fn cover_layers_are_optional_roundtrip_and_reject_unsafe_values() {
     );
     assert!(serde_json::from_value::<TextSegment>(data).is_err());
 }
+
+#[test]
+fn a_card_has_at_most_one_title_layer_and_v1_layers_still_read() {
+    let segment = card(TitleCardRole::Intro, 2.0);
+    let pose = json!({"center": {"x": 0.5, "y": 0.5}, "size": {"x": 0.5, "y": 0.2}});
+    let mut data = value(&segment);
+    data["titleCard"]["layers"] = json!([
+        {"id": "t", "pose": pose, "kind": {"type": "title", "stroke": "#111111", "font": "Smiley Sans"}},
+        {"id": "v1", "pose": pose, "kind": {"type": "text", "content": "旧", "color": "#FFFFFF"}},
+        {"id": "p", "pose": pose, "kind": {"type": "image", "path": "content/images/p.png",
+            "persona": {"persona": "hanfu", "file": "hanfu-smile.webp"}}},
+    ]);
+    let reopened: TextSegment = serde_json::from_value(data.clone()).unwrap();
+    let card = reopened.title_card.as_ref().unwrap();
+    assert!(card.has_title_layer());
+    assert_eq!(
+        card.layers[0].kind.text_style().unwrap().font.as_deref(),
+        Some("Smiley Sans")
+    );
+    assert!(matches!(
+        &card.layers[1].kind,
+        CoverLayerKind::Text { font: None, .. }
+    ));
+
+    data["titleCard"]["layers"][1] = json!({"id": "t2", "pose": pose, "kind": {"type": "title"}});
+    assert!(serde_json::from_value::<TextSegment>(data.clone()).is_err());
+    data["titleCard"]["layers"][1] = json!({"id": "x", "pose": pose,
+        "kind": {"type": "image", "path": "content/images/p.png", "persona": {"persona": "../x", "file": "a"}}});
+    assert!(serde_json::from_value::<TextSegment>(data).is_err());
+}

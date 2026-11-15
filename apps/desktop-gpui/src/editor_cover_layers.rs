@@ -4,11 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
-use cap_project::{CoverLayer, CoverLayerKind, LayerPose, XY};
+use cap_project::{CoverLayer, CoverLayerKind, CoverPersonaRef, CoverTextStyle, LayerPose, XY};
 use gpui::{
-    AnyElement, AsyncWindowContext, Context, Hsla, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, StyledImage, Window, div, img, prelude::FluentBuilder, px,
-    rgb,
+    AnyElement, AppContext as _, AsyncWindowContext, Context, Hsla, InteractiveElement,
+    IntoElement, ParentElement, StatefulInteractiveElement, Styled, StyledImage, Window, div, img,
+    prelude::FluentBuilder, px, rgb,
 };
 
 use crate::{
@@ -28,6 +28,15 @@ pub(crate) const TEXT_STYLES: &[(&str, Option<&str>, Option<&str>)] = &[
     ("#111111", None, Some("#FACC15")),
 ];
 
+/// Fonts that suit a cover's big words, the default first.
+const COVER_FONTS: &[&str] = &[
+    "Noto Sans SC",
+    "Smiley Sans",
+    "宋骨黑体",
+    "LXGW WenKai Lite",
+    "Noto Serif SC",
+];
+
 #[derive(Default)]
 pub(crate) struct CoverLayerUi {
     /// The persona grid is open to add a person as a layer.
@@ -35,6 +44,23 @@ pub(crate) struct CoverLayerUi {
     busy: bool,
     /// Pixel sizes of placed people, read once from their files.
     sizes: std::cell::RefCell<std::collections::HashMap<String, Option<(u32, u32)>>>,
+}
+
+impl CoverLayerUi {
+    /// Opens the person picker on one persona.
+    pub(crate) fn show_persona(&mut self, id: &str) {
+        self.adding_person = Some(id.to_owned());
+    }
+}
+
+impl crate::editor_title_cards::TitleCardUi {
+    pub(crate) fn layers_busy(&self) -> bool {
+        self.layers.busy
+    }
+
+    pub(crate) fn set_layers_busy(&mut self, busy: bool) {
+        self.layers.busy = busy;
+    }
 }
 
 /// A layer's box from its pose, normalised to the card.
@@ -81,7 +107,7 @@ fn read_layer_picture(source: &Path) -> Result<(Vec<u8>, String), String> {
 }
 
 impl EditorWindow {
-    fn cover_card(&self, index: usize) -> Option<&cap_project::TextSegment> {
+    pub(crate) fn cover_card(&self, index: usize) -> Option<&cap_project::TextSegment> {
         self.project
             .timeline
             .as_ref()?
@@ -210,7 +236,7 @@ impl EditorWindow {
         true
     }
 
-    fn cover_output(&self) -> (u32, u32) {
+    pub(crate) fn cover_output(&self) -> (u32, u32) {
         self.frame_layout
             .as_ref()
             .map(|layout| (layout.output_size[0], layout.output_size[1]))
@@ -218,7 +244,7 @@ impl EditorWindow {
             .unwrap_or((1920, 1080))
     }
 
-    fn card_index_by_id(&self, card_id: &str) -> Option<usize> {
+    pub(crate) fn card_index_by_id(&self, card_id: &str) -> Option<usize> {
         self.project
             .timeline
             .as_ref()?
@@ -322,6 +348,7 @@ impl EditorWindow {
                 color: color.into(),
                 stroke: stroke.map(Into::into),
                 band: band.map(Into::into),
+                font: None,
             },
         );
         self.push_cover_layer(&card_id, layer, window, cx);
@@ -362,6 +389,7 @@ impl EditorWindow {
                             CoverLayerKind::Image {
                                 path: record.path,
                                 mirror: false,
+                                persona: None,
                             },
                         );
                         this.push_cover_layer(&card_id, layer, window, cx);
@@ -445,6 +473,10 @@ impl EditorWindow {
         }
         let project_path = self.project_path.clone();
         let output = self.cover_output();
+        let reference = CoverPersonaRef {
+            persona: persona.id.clone(),
+            file: file.clone(),
+        };
         self.sidebar.title_cards.layers.busy = true;
         cx.notify();
         cx.spawn_in(window, async move |this, cx: &mut AsyncWindowContext| {
@@ -470,10 +502,84 @@ impl EditorWindow {
                                     facing,
                                     cap_project::TitleCardSubjectSide::Right,
                                 ),
+                                persona: Some(reference),
                             },
                         );
                         this.sidebar.title_cards.layers.adding_person = None;
                         this.push_cover_layer(&card_id, layer, window, cx);
+                    }
+                    Err(error) => this.title_card_error(error, window, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Puts another pose of the same person in a layer's place, standing
+    /// where the old one stood.
+    fn swap_cover_pose(
+        &mut self,
+        index: usize,
+        layer: usize,
+        persona: Persona,
+        file: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pose) = persona
+            .manifest
+            .poses
+            .iter()
+            .find(|pose| pose.file == file)
+            .cloned()
+        else {
+            return;
+        };
+        if self.sidebar.title_cards.layers.busy {
+            return;
+        }
+        let Some(card_id) = self.card_id_at(index) else {
+            return;
+        };
+        let project_path = self.project_path.clone();
+        let output = self.cover_output();
+        let reference = CoverPersonaRef {
+            persona: persona.id.clone(),
+            file,
+        };
+        self.sidebar.title_cards.layers.busy = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx: &mut AsyncWindowContext| {
+            let placed = cx
+                .background_executor()
+                .spawn(async move { personas::place_in_project(&project_path, &persona, &pose) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.sidebar.title_cards.layers.busy = false;
+                match placed {
+                    Ok((record, size)) => {
+                        this.remember_project_asset(record.clone(), cx);
+                        let Some(index) = this.card_index_by_id(&card_id) else {
+                            return;
+                        };
+                        this.edit_cover_layer(index, layer, window, cx, move |layers, layer| {
+                            let item = &mut layers[layer];
+                            let bottom = item.pose.center.y + item.pose.size.y / 2.;
+                            let fitted = picture_pose(
+                                (item.pose.center.x, item.pose.center.y),
+                                item.pose.size.y,
+                                size,
+                                output,
+                            );
+                            item.pose.size = fitted.size;
+                            item.pose.center.y = bottom - fitted.size.y / 2.;
+                            if let CoverLayerKind::Image { path, persona, .. } = &mut item.kind {
+                                *path = record.path;
+                                *persona = Some(reference);
+                            }
+                        });
                     }
                     Err(error) => this.title_card_error(error, window, cx),
                 }
@@ -516,6 +622,174 @@ impl EditorWindow {
         });
     }
 
+    /// Opens a text layer for typing on the canvas. Returns false for a
+    /// picture, which has nothing to type.
+    pub(crate) fn begin_cover_text_edit(
+        &mut self,
+        index: usize,
+        layer: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(segment) = self
+            .project
+            .timeline
+            .as_ref()
+            .and_then(|timeline| timeline.text_segments.get(index))
+        else {
+            return false;
+        };
+        let Some(item) = segment
+            .title_card
+            .as_ref()
+            .and_then(|card| card.layers.get(layer))
+        else {
+            return false;
+        };
+        let title = matches!(item.kind, CoverLayerKind::Title { .. });
+        let before = match &item.kind {
+            CoverLayerKind::Title { .. } => segment.content.clone(),
+            CoverLayerKind::Text { content, .. } => content.clone(),
+            CoverLayerKind::Image { .. } => return false,
+        };
+        self.stop_canvas_text_edit(cx);
+        self.end_field_edit(cx);
+        let input = cx.new(|cx| crate::ui::TextInputState::multi_line(window, cx));
+        input.update(cx, |input, cx| input.set_text(before.clone(), cx));
+        let write = move |this: &mut Self,
+                          text: String,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+            if title {
+                this.edit_text_segment("cover-title-content", index, window, cx, move |segment| {
+                    if segment.content == text {
+                        return false;
+                    }
+                    segment.content = text;
+                    true
+                });
+            } else if let Some(CoverLayerKind::Text { content, .. }) = this
+                .project
+                .timeline
+                .as_mut()
+                .and_then(|timeline| timeline.text_segments.get_mut(index))
+                .and_then(|segment| segment.title_card.as_mut())
+                .and_then(|card| card.layers.get_mut(layer))
+                .map(|item| &mut item.kind)
+                && *content != text
+            {
+                *content = text;
+                this.project_changed_live(cx);
+                this.schedule_save(window, cx);
+            }
+        };
+        let subscription =
+            cx.subscribe_in(&input, window, move |this, input, event, window, cx| {
+                if this
+                    .canvas_text_edit
+                    .as_ref()
+                    .is_none_or(|edit| edit.index != index || edit.layer != Some(layer))
+                {
+                    return;
+                }
+                match event {
+                    crate::ui::TextInputEvent::Changed => {
+                        let mut text = input.read(cx).text().to_owned();
+                        if title && text.trim().is_empty() {
+                            text = this.canvas_text_edit.as_ref().unwrap().before.clone();
+                        }
+                        write(this, text, window, cx);
+                    }
+                    crate::ui::TextInputEvent::Cancelled => {
+                        let before = this.canvas_text_edit.as_ref().unwrap().before.clone();
+                        write(this, before, window, cx);
+                        this.stop_canvas_text_edit(cx);
+                        this.focus_root(window, cx);
+                    }
+                    crate::ui::TextInputEvent::Blurred | crate::ui::TextInputEvent::Confirmed => {
+                        this.stop_canvas_text_edit(cx);
+                    }
+                }
+            });
+        self.history.pause();
+        self.canvas_text_edit = Some(crate::editor_canvas::CanvasTextEdit {
+            index,
+            layer: Some(layer),
+            before,
+            input: input.clone(),
+            _subscription: subscription,
+        });
+        input.update(cx, |input, cx| input.focus_and_select_all(window, cx));
+        self.publish_project();
+        cx.notify();
+        true
+    }
+
+    /// The typing box over a text layer, sized like the words under it.
+    pub(crate) fn render_cover_text_input(
+        &self,
+        element: CanvasSelection,
+        rect: crate::editor_canvas::NormRect,
+        canvas: (f32, f32),
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(edit) = self.canvas_text_edit.as_ref() else {
+            return div().into_any_element();
+        };
+        let CanvasSelection::CoverLayer(index, layer) = element else {
+            return div().into_any_element();
+        };
+        let style = self
+            .cover_card(index)
+            .and_then(|segment| segment.title_card.as_ref()?.layers.get(layer))
+            .and_then(|item| item.kind.text_style());
+        let lines = edit.before.lines().count().max(1) as f32;
+        let height = rect.h as f32 * canvas.1;
+        let font_size = (height / lines / 1.15 * 0.86).max(10.0);
+        let color = style
+            .as_ref()
+            .and_then(|style| u32::from_str_radix(style.color.trim_start_matches('#'), 16).ok())
+            .map(|value| Hsla::from(rgb(value)))
+            .unwrap_or_else(gpui::white);
+        let band = style
+            .as_ref()
+            .and_then(|style| style.band.as_ref())
+            .and_then(|band| u32::from_str_radix(band.trim_start_matches('#'), 16).ok())
+            .map(|value| Hsla::from(rgb(value)))
+            .unwrap_or_else(|| gpui::hsla(0., 0., 0., 0.55));
+        let family = style
+            .and_then(|style| style.font)
+            .unwrap_or_else(|| COVER_FONTS[0].to_owned());
+        div()
+            .id("cover-text-editor")
+            .absolute()
+            .left(px(rect.x as f32 * canvas.0))
+            .top(px(rect.y as f32 * canvas.1))
+            .w(px(rect.w as f32 * canvas.0))
+            .h(px(height.max(font_size * 1.3)))
+            .occlude()
+            .rounded(px(4.))
+            .bg(band)
+            .border_1()
+            .border_color(Hsla::from(self.theme.blue_9))
+            .font_family(gpui::SharedString::from(family))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                crate::ui::TextInput::bare(&self.theme, "cover-text-inline-input", &edit.input)
+                    .height(px(height.max(font_size * 1.3)))
+                    .padding_x(px(0.))
+                    .padding_y(px(0.))
+                    .text_size(px(font_size))
+                    .line_height(px(font_size * 1.15))
+                    .font_weight(gpui::FontWeight::BLACK)
+                    .align(gpui::TextAlign::Center)
+                    .text_color(color)
+                    .caret_color(color)
+                    .selection_color(gpui::hsla(0.58, 0.9, 0.6, 0.35)),
+            )
+            .into_any_element()
+    }
+
     /// Deletes the cover element selected on the canvas. Returns whether one
     /// was selected.
     pub(crate) fn delete_cover_selection(
@@ -533,7 +807,6 @@ impl EditorWindow {
             }
             Some(CanvasSelection::CoverSubject(index)) => {
                 self.canvas_selection = None;
-                self.sidebar.title_cards.subject.forget_placed();
                 self.update_title_card(index, window, cx, |segment| {
                     segment.title_card.as_mut().unwrap().subject = None;
                 });
@@ -555,7 +828,7 @@ impl EditorWindow {
             .as_ref()?;
         match &card.layers.get(layer)?.kind {
             CoverLayerKind::Text { content, .. } => Some(content),
-            CoverLayerKind::Image { .. } => None,
+            _ => None,
         }
     }
 
@@ -641,31 +914,49 @@ impl EditorWindow {
 
         let person_grid = adding_person.map(|browsing| {
             let personas = self.sidebar.title_cards.subject.persona_list();
-            let chips = div()
-                .flex()
-                .flex_wrap()
-                .gap(px(6.))
-                .children(personas.iter().map(|persona| {
-                    let id = persona.id.clone();
-                    let name = if persona.builtin {
-                        persona.display_name().to_owned()
-                    } else {
-                        tr::editor::title_cards::subject_mine().to_string()
-                    };
-                    ui::EditorButton::plain(
-                        &theme,
-                        gpui::ElementId::Name(format!("cover-persona-{id}").into()),
-                    )
-                    .choice(&theme)
-                    .height(px(28.))
-                    .text_size(px(12.))
-                    .label(name)
-                    .pressed(browsing == id)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.sidebar.title_cards.layers.adding_person = Some(id.clone());
-                        cx.notify();
+            let chips =
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .children(personas.iter().map(|persona| {
+                        let id = persona.id.clone();
+                        let name = if persona.builtin {
+                            persona.display_name().to_owned()
+                        } else {
+                            tr::editor::title_cards::subject_mine().to_string()
+                        };
+                        ui::EditorButton::plain(
+                            &theme,
+                            gpui::ElementId::Name(format!("cover-persona-{id}").into()),
+                        )
+                        .choice(&theme)
+                        .height(px(28.))
+                        .text_size(px(12.))
+                        .label(name)
+                        .pressed(browsing == id)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sidebar.title_cards.layers.adding_person = Some(id.clone());
+                            cx.notify();
+                        }))
                     }))
-                }));
+                    .child(
+                        ui::EditorButton::plain(&theme, "cover-persona-upload")
+                            .outlined(&theme)
+                            .height(px(28.))
+                            .text_size(px(12.))
+                            .left_icon("icons/image.svg")
+                            .icon_size(px(12.))
+                            .label(if self.sidebar.title_cards.subject.busy {
+                                tr::editor::title_cards::subject_busy()
+                            } else {
+                                tr::editor::title_cards::subject_upload()
+                            })
+                            .disabled(busy || self.sidebar.title_cards.subject.busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.import_persona_photo(window, cx)
+                            })),
+                    );
             let grid = personas
                 .iter()
                 .find(|persona| persona.id == browsing)
@@ -753,79 +1044,154 @@ impl EditorWindow {
             .p(px(10.))
             .rounded(px(8.))
             .bg(Hsla::from(theme.editor.ctl));
-        match &item.kind {
-            CoverLayerKind::Text {
-                color,
-                stroke,
-                band,
-                ..
-            } => {
-                body = body
-                    .child(
-                        self.render_field_input(FieldKey::CoverLayerText(index, layer), Some(52.)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(6.))
-                            .children(TEXT_STYLES.iter().enumerate().map(
-                                |(style, (fill, outline, back))| {
-                                    let current = color == fill
-                                        && stroke.as_deref() == *outline
-                                        && band.as_deref() == *back;
-                                    let hex = |value: &str| {
-                                        rgb(u32::from_str_radix(value.trim_start_matches('#'), 16)
-                                            .unwrap_or(0))
-                                    };
-                                    let (fill, outline, back) = (*fill, *outline, *back);
-                                    div()
-                                        .id(("cover-text-style", style))
-                                        .h(px(30.))
-                                        .flex_1()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(6.))
-                                        .bg(back.map_or(gpui::hsla(0., 0., 0.42, 1.), |back| {
-                                            hex(back).into()
-                                        }))
-                                        .border_2()
-                                        .border_color(if current {
-                                            Hsla::from(theme.editor.accent)
-                                        } else {
-                                            gpui::transparent_black()
-                                        })
-                                        .cursor_pointer()
-                                        .text_size(px(14.))
-                                        .font_weight(gpui::FontWeight::BLACK)
-                                        .text_color(hex(fill))
-                                        .child(tr::editor::title_cards::layer_style_sample())
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.edit_cover_layer(
-                                                index,
-                                                layer,
-                                                window,
-                                                cx,
-                                                move |layers, layer| {
-                                                    if let CoverLayerKind::Text {
-                                                        color,
-                                                        stroke,
-                                                        band,
-                                                        ..
-                                                    } = &mut layers[layer].kind
-                                                    {
-                                                        *color = fill.into();
-                                                        *stroke = outline.map(Into::into);
-                                                        *band = back.map(Into::into);
-                                                    }
-                                                },
-                                            );
-                                        }))
+        if let Some(style) = item.kind.text_style() {
+            let field = if matches!(item.kind, CoverLayerKind::Title { .. }) {
+                FieldKey::TextContent(index)
+            } else {
+                FieldKey::CoverLayerText(index, layer)
+            };
+            let hex = |value: &str| {
+                rgb(u32::from_str_radix(value.trim_start_matches('#'), 16).unwrap_or(0))
+            };
+            let styles = TEXT_STYLES
+                .iter()
+                .enumerate()
+                .map(|(slot, (fill, outline, back))| {
+                    let current = style.color == *fill
+                        && style.stroke.as_deref() == *outline
+                        && style.band.as_deref() == *back;
+                    let (fill, outline, back) = (*fill, *outline, *back);
+                    let font = style.font.clone();
+                    div()
+                        .id(("cover-text-style", slot))
+                        .h(px(30.))
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .bg(back.map_or(gpui::hsla(0., 0., 0.42, 1.), |back| hex(back).into()))
+                        .border_2()
+                        .border_color(if current {
+                            Hsla::from(theme.editor.accent)
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .cursor_pointer()
+                        .text_size(px(14.))
+                        .font_weight(gpui::FontWeight::BLACK)
+                        .text_color(hex(fill))
+                        .child(tr::editor::title_cards::layer_style_sample())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let next = CoverTextStyle {
+                                color: fill.into(),
+                                stroke: outline.map(Into::into),
+                                band: back.map(Into::into),
+                                font: font.clone(),
+                            };
+                            this.edit_cover_layer(
+                                index,
+                                layer,
+                                window,
+                                cx,
+                                move |layers, layer| {
+                                    layers[layer].kind.set_text_style(next);
                                 },
-                            )),
-                    );
-            }
-            CoverLayerKind::Image { .. } => {}
+                            );
+                        }))
+                });
+            let current_font = style.font.clone().unwrap_or_else(|| COVER_FONTS[0].into());
+            let fonts = COVER_FONTS
+                .iter()
+                .filter(|family| cap_rendering::font_family_available(family))
+                .map(|family| {
+                    let family = *family;
+                    let style = style.clone();
+                    ui::EditorButton::plain(
+                        &theme,
+                        gpui::ElementId::Name(format!("cover-font-{family}").into()),
+                    )
+                    .choice(&theme)
+                    .height(px(26.))
+                    .text_size(px(12.))
+                    .label(crate::editor_tabs::font_option_label(family))
+                    .pressed(current_font == family)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let mut next = style.clone();
+                        next.font = (family != COVER_FONTS[0]).then(|| family.to_owned());
+                        this.edit_cover_layer(index, layer, window, cx, move |layers, layer| {
+                            layers[layer].kind.set_text_style(next);
+                        });
+                    }))
+                });
+            body = body
+                .child(self.render_field_input(field, Some(52.)))
+                .child(div().flex().gap(px(6.)).children(styles))
+                .child(div().flex().flex_wrap().gap(px(6.)).children(fonts));
+        }
+        if let CoverLayerKind::Image {
+            persona: Some(reference),
+            ..
+        } = &item.kind
+            && let Some(persona) = self
+                .sidebar
+                .title_cards
+                .subject
+                .persona_list()
+                .into_iter()
+                .find(|persona| persona.id == reference.persona)
+        {
+            let busy = self.sidebar.title_cards.layers.busy;
+            let outfit = persona
+                .manifest
+                .poses
+                .iter()
+                .find(|pose| pose.file == reference.file)
+                .map(|pose| pose.outfit.clone());
+            let grid = div().grid().grid_cols(6).gap(px(4.)).children(
+                persona
+                    .manifest
+                    .poses
+                    .iter()
+                    .filter(|pose| outfit.as_ref().is_none_or(|outfit| &pose.outfit == outfit))
+                    .filter_map(|pose| {
+                        let path = persona.pose_path(pose)?;
+                        let chosen = persona.clone();
+                        let file = pose.file.clone();
+                        let current = file == reference.file;
+                        Some(
+                            div()
+                                .id(gpui::ElementId::Name(format!("cover-swap-{file}").into()))
+                                .h(px(52.))
+                                .rounded(px(6.))
+                                .overflow_hidden()
+                                .bg(Hsla::from(theme.editor.card))
+                                .border_1()
+                                .border_color(if current {
+                                    Hsla::from(theme.editor.accent)
+                                } else {
+                                    Hsla::from(theme.editor.line)
+                                })
+                                .when(!busy && !current, |this| this.cursor_pointer())
+                                .child(img(path).size_full().object_fit(gpui::ObjectFit::Contain))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if !current {
+                                        this.swap_cover_pose(
+                                            index,
+                                            layer,
+                                            chosen.clone(),
+                                            file.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                    }),
+            );
+            body = body.child(
+                ui::Field::stacked(&theme, tr::editor::cover_templates::change_pose()).child(grid),
+            );
         }
         let small = |id: &'static str, label: &'static str| {
             ui::EditorButton::plain(&theme, id)

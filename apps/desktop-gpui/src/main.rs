@@ -31,6 +31,7 @@ mod caption_review;
 mod caption_translation;
 mod controls_window;
 mod cover_generation;
+mod cover_templates;
 mod crash_capture;
 mod deeplink;
 mod dev_restore;

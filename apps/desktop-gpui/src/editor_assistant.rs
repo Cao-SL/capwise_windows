@@ -584,7 +584,13 @@ fn prepare(
         let mut card = next
             .title_card(TitleCardRole::Intro)
             .cloned()
-            .unwrap_or_else(|| TextSegment::new_title_card(TitleCardRole::Intro, &cover.title));
+            .unwrap_or_else(|| {
+                let mut card = TextSegment::new_title_card(TitleCardRole::Intro, &cover.title);
+                card.title_card.as_mut().unwrap().layers = crate::cover_templates::starting_layers(
+                    crate::cover_templates::project_output(project),
+                );
+                card
+            });
         card.content = cover.title.clone();
         if let Some(duration) = cover.duration {
             card.end = card.start + duration;
@@ -2316,6 +2322,9 @@ impl EditorWindow {
             }
         }
         card = card.child(lines);
+        if preview.plan.cover.is_some() {
+            card = card.child(self.render_cover_ai_choices(cx));
+        }
         let before = self.project.timeline.as_ref().map_or(0., |t| t.duration());
         let after = preview
             .candidate

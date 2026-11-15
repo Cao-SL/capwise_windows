@@ -491,6 +491,15 @@ pub(crate) fn store_section_checked(section: &str) -> Result<Map<String, Value>,
     }
 }
 
+/// One string setting from one store section, for small app preferences.
+pub fn store_string(section: &str, key: &str) -> Option<String> {
+    cached_store(&tauri_store_path())?
+        .get(section)?
+        .get(key)?
+        .as_str()
+        .map(str::to_owned)
+}
+
 pub fn notification_sounds_enabled() -> bool {
     cached_store(&tauri_store_path())
         .and_then(|store| {

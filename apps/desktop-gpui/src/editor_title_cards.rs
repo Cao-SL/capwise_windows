@@ -8,7 +8,7 @@ use std::{
 
 use cap_project::{
     ProjectConfiguration, TextSegment, TitleCardBackground, TitleCardError, TitleCardImageFit,
-    TitleCardRole, TitleCardTemplate, XY,
+    TitleCardRole, XY,
 };
 use gpui::{
     AnyElement, AsyncWindowContext, Context, Hsla, IntoElement, ParentElement, SharedString,
@@ -18,8 +18,8 @@ use gpui::{
 use crate::{
     asset_library::{self, AssetKind, AssetRecord},
     editor_edits::{self, Selection},
-    editor_panels::{FieldKey, PanelSlider},
-    editor_sidebar::{ColorTarget, SliderKey},
+    editor_panels::FieldKey,
+    editor_sidebar::ColorTarget,
     editor_timeline::TrackKind,
     editor_window::EditorWindow,
     i18n::tr,
@@ -599,6 +599,8 @@ impl EditorWindow {
             };
             let mut segment = TextSegment::new_title_card(role, title);
             segment.track = title_card_lane(&self.project);
+            segment.title_card.as_mut().unwrap().layers =
+                crate::cover_templates::starting_layers(self.cover_output());
             if !self.title_card_edit("title-card-create", window, cx, move |project| {
                 project
                     .upsert_title_card(segment)
@@ -971,7 +973,6 @@ impl EditorWindow {
             return div().into_any_element();
         };
         let role = card.role;
-        let template = card.template;
         let solid_color = match &card.background {
             TitleCardBackground::Solid { color } => Some(color.clone()),
             TitleCardBackground::ProjectImage { .. } => None,
@@ -986,72 +987,67 @@ impl EditorWindow {
         });
         let image_background = solid_color.is_none();
         let ai_busy = self.assistant_cover_busy() || self.assistant.busy;
+        let busy = self.sidebar.title_cards.layers_busy();
         let divider = || {
             div()
                 .h(px(1.))
                 .bg(Hsla::from(theme.editor.line))
                 .into_any_element()
         };
-        // Ordered the way people work on a cover: the words, how they are
-        // laid out, what sits behind them, how long it stays -- then type
-        // styling, then the rare actions. No instructions in between.
+        let roles = ui::SegmentedControl::editor(
+            &theme,
+            "cover-role",
+            [
+                (TitleCardRole::Intro, tr::editor::cover_templates::cover()),
+                (TitleCardRole::Outro, tr::editor::cover_templates::outro()),
+            ]
+            .into_iter()
+            .map(|(value, label)| ui::SegmentOption::new(label, value == role))
+            .collect(),
+        )
+        .stretch()
+        .on_select(cx.listener(move |this, selected: &usize, window, cx| {
+            let next = [TitleCardRole::Intro, TitleCardRole::Outro][*selected];
+            if next != role {
+                this.canvas_selection = None;
+                this.open_title_card(next, window, cx);
+            }
+        }));
+        let chip = |id: SharedString, label: &'static str| {
+            ui::EditorButton::plain(&theme, id)
+                .choice(&theme)
+                .height(px(28.))
+                .text_size(px(12.))
+                .label(label)
+                .disabled(busy)
+        };
+        let templates = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(6.))
+            .children(crate::cover_templates::TEMPLATES.iter().map(|template| {
+                let id = template.id;
+                chip(
+                    SharedString::from(format!("cover-template-{id}")),
+                    template.name(),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.apply_cover_template(index, id, window, cx)
+                }))
+            }))
+            .child(
+                chip(
+                    "cover-template-mine".into(),
+                    tr::editor::cover_templates::mine(),
+                )
+                .pressed(self.title_card_library_open())
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_my_templates(window, cx))),
+            );
         div()
             .flex()
             .flex_col()
             .gap(px(16.))
-            .child(
-                ui::Field::stacked(&theme, tr::editor::title_cards::title())
-                    .child(self.render_field_input(FieldKey::TextContent(index), Some(64.))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(8.))
-                    .child(div().flex_1().min_w_0().child(
-                        ui::Field::stacked(&theme, tr::editor::title_cards::subtitle()).child(
-                            self.render_field_input(FieldKey::TitleCardSubtitle(index), None),
-                        ),
-                    ))
-                    .child(
-                        div().w(px(120.)).flex_none().child(
-                            ui::Field::stacked(&theme, tr::editor::title_cards::kicker()).child(
-                                self.render_field_input(FieldKey::TitleCardKicker(index), None),
-                            ),
-                        ),
-                    ),
-            )
-            .child(
-                ui::Field::stacked(&theme, tr::editor::title_cards::template()).child(
-                    ui::SegmentedControl::editor(
-                        &theme,
-                        "title-card-template",
-                        [
-                            (TitleCardTemplate::Hero, tr::editor::title_cards::hero()),
-                            (
-                                TitleCardTemplate::Editorial,
-                                tr::editor::title_cards::editorial(),
-                            ),
-                            (TitleCardTemplate::Split, tr::editor::title_cards::split()),
-                        ]
-                        .into_iter()
-                        .map(|(value, label)| ui::SegmentOption::new(label, value == template))
-                        .collect(),
-                    )
-                    .stretch()
-                    .on_select(cx.listener(
-                        move |this, selected: &usize, window, cx| {
-                            let template = [
-                                TitleCardTemplate::Hero,
-                                TitleCardTemplate::Editorial,
-                                TitleCardTemplate::Split,
-                            ][*selected];
-                            this.update_title_card(index, window, cx, move |segment| {
-                                segment.title_card.as_mut().unwrap().template = template
-                            });
-                        },
-                    )),
-                ),
-            )
+            .child(roles)
             .child(
                 ui::Field::stacked(&theme, tr::editor::title_cards::background()).child(
                     div()
@@ -1072,8 +1068,9 @@ impl EditorWindow {
                                         .pressed(!image_background)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.update_title_card(index, window, cx, |segment| {
-                                                segment.title_card.as_mut().unwrap().background =
-                                                    TitleCardBackground::default()
+                                                let card = segment.title_card.as_mut().unwrap();
+                                                card.background = TitleCardBackground::default();
+                                                card.hide_title = false;
                                             });
                                         })),
                                 )
@@ -1120,23 +1117,14 @@ impl EditorWindow {
                         })),
                 ),
             )
-            .when(role == TitleCardRole::Intro, |this| {
-                this.child(self.render_title_card_subject(index, card.subject.as_ref(), cx))
+            .child(
+                ui::Field::stacked(&theme, tr::editor::cover_templates::templates())
+                    .child(templates),
+            )
+            .when(self.title_card_library_open(), |this| {
+                this.child(self.render_title_card_library(Some(role), cx))
             })
             .child(self.render_cover_layers(index, card, cx))
-            .when(card.hide_title, |this| {
-                this.child(
-                    div()
-                        .px(px(10.))
-                        .py(px(8.))
-                        .rounded(px(8.))
-                        .bg(Hsla::from(theme.editor.ctl))
-                        .text_size(px(12.))
-                        .line_height(px(18.))
-                        .text_color(Hsla::from(theme.editor.text_2))
-                        .child(tr::editor::title_cards::finished_note()),
-                )
-            })
             .child(
                 ui::Field::stacked(&theme, tr::editor::title_cards::duration())
                     .child(self.render_title_card_hold(index, segment.end - segment.start, cx)),
@@ -1148,70 +1136,6 @@ impl EditorWindow {
                     .child(error.clone())
             }))
             .child(divider())
-            .child(self.render_text_font_controls(index, true, cx))
-            .child(
-                ui::Field::inline(&theme, tr::editor::panel::text_segment::color()).child(
-                    div().w(px(170.)).child(self.render_color_input(
-                        ColorTarget::TextColor(index),
-                        &segment.color,
-                        cx,
-                    )),
-                ),
-            )
-            .child(
-                self.more_settings("title-card-text-effects", cx, move |this, cx| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.))
-                        .child(this.slider_field(
-                            tr::editor::panel::text_segment::line_height(),
-                            SliderKey::Panel(PanelSlider::TextLineHeight, index),
-                            "",
-                            cx,
-                        ))
-                        .child(this.slider_field(
-                            tr::editor::panel::text_segment::letter_spacing(),
-                            SliderKey::Panel(PanelSlider::TextLetterSpacing, index),
-                            "px",
-                            cx,
-                        ))
-                        .child(this.slider_field(
-                            tr::editor::panel::text_segment::outline(),
-                            SliderKey::Panel(PanelSlider::TextStroke, index),
-                            "px",
-                            cx,
-                        ))
-                        .children((segment.stroke_width > 0.).then(|| {
-                            this.render_color_input(
-                                ColorTarget::TextStroke(index),
-                                &segment.stroke_color,
-                                cx,
-                            )
-                        }))
-                        .child(this.slider_field(
-                            tr::editor::panel::text_segment::shadow(),
-                            SliderKey::Panel(PanelSlider::TextShadow, index),
-                            "x100%",
-                            cx,
-                        ))
-                        .child(this.slider_field(
-                            tr::editor::panel::text_segment::glow(),
-                            SliderKey::Panel(PanelSlider::TextGlow, index),
-                            "x100%",
-                            cx,
-                        ))
-                        .child(this.slider_field(
-                            tr::editor::panel::opacity(),
-                            SliderKey::Panel(PanelSlider::TextOpacity, index),
-                            "x100%",
-                            cx,
-                        ))
-                        .into_any_element()
-                }),
-            )
-            .child(divider())
-            .child(self.render_title_card_library(Some(role), cx))
             .child(
                 div()
                     .flex()
@@ -1259,6 +1183,18 @@ impl EditorWindow {
                                 cx.notify();
                             }))
                     }))
+                    .child(
+                        ui::EditorButton::plain(&theme, "cover-save-template")
+                            .outlined(&theme)
+                            .left_icon("icons/save.svg")
+                            .icon_size(px(13.))
+                            .text_size(px(12.))
+                            .height(px(30.))
+                            .label(tr::editor::cover_templates::save_template())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.save_title_card_template(role, window, cx)
+                            })),
+                    )
                     .child(div().flex_1())
                     .child(
                         ui::EditorButton::plain(&theme, "title-card-remove")

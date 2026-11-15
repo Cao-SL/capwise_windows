@@ -102,6 +102,18 @@ pub struct CoverLayer {
 #[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CoverLayerKind {
+    /// The card's title: its words are the segment's own content, so the
+    /// title stays one thing that generation and naming read.
+    Title {
+        #[serde(default = "white")]
+        color: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stroke: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        band: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font: Option<String>,
+    },
     Text {
         content: String,
         #[serde(default = "white")]
@@ -113,12 +125,86 @@ pub enum CoverLayerKind {
         /// A filled band behind the words.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         band: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font: Option<String>,
     },
     Image {
         path: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         mirror: bool,
+        /// Set when the picture is a persona's pose, so its expression can
+        /// be swapped in place.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona: Option<CoverPersonaRef>,
     },
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverPersonaRef {
+    pub persona: String,
+    pub file: String,
+}
+
+/// How a title or text layer's words look.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoverTextStyle {
+    pub color: String,
+    pub stroke: Option<String>,
+    pub band: Option<String>,
+    pub font: Option<String>,
+}
+
+impl CoverLayerKind {
+    pub fn text_style(&self) -> Option<CoverTextStyle> {
+        match self {
+            Self::Title {
+                color,
+                stroke,
+                band,
+                font,
+            }
+            | Self::Text {
+                color,
+                stroke,
+                band,
+                font,
+                ..
+            } => Some(CoverTextStyle {
+                color: color.clone(),
+                stroke: stroke.clone(),
+                band: band.clone(),
+                font: font.clone(),
+            }),
+            Self::Image { .. } => None,
+        }
+    }
+
+    pub fn set_text_style(&mut self, style: CoverTextStyle) {
+        if let Self::Title {
+            color,
+            stroke,
+            band,
+            font,
+        }
+        | Self::Text {
+            color,
+            stroke,
+            band,
+            font,
+            ..
+        } = self
+        {
+            *color = style.color;
+            *stroke = style.stroke;
+            *band = style.band;
+            *font = style.font;
+        }
+    }
+
+    pub fn is_text(&self) -> bool {
+        !matches!(self, Self::Image { .. })
+    }
 }
 
 fn white() -> String {
@@ -129,6 +215,19 @@ fn valid_color(color: &str) -> bool {
     color.len() == 7
         && color.starts_with('#')
         && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn valid_font(font: &str) -> bool {
+    !font.is_empty() && font.len() <= 64 && !font.chars().any(char::is_control)
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.chars().any(char::is_control)
+        && !name.contains(['/', '\\', ':'])
+        && name != "."
+        && name != ".."
 }
 
 fn valid_pose(pose: &LayerPose) -> bool {
@@ -151,22 +250,26 @@ impl CoverLayer {
     }
 
     fn validate(&self) -> bool {
+        let style = self.kind.text_style().is_none_or(|style| {
+            valid_color(&style.color)
+                && style.stroke.as_deref().is_none_or(valid_color)
+                && style.band.as_deref().is_none_or(valid_color)
+                && style.font.as_deref().is_none_or(valid_font)
+        });
         valid_id(&self.id)
             && valid_pose(&self.pose)
+            && style
             && match &self.kind {
-                CoverLayerKind::Text {
-                    content,
-                    color,
-                    stroke,
-                    band,
-                } => {
-                    content.len() <= 512
-                        && !content.contains('\0')
-                        && valid_color(color)
-                        && stroke.as_deref().is_none_or(valid_color)
-                        && band.as_deref().is_none_or(valid_color)
+                CoverLayerKind::Title { .. } => true,
+                CoverLayerKind::Text { content, .. } => {
+                    content.len() <= 512 && !content.contains('\0')
                 }
-                CoverLayerKind::Image { path, .. } => valid_project_path(path),
+                CoverLayerKind::Image { path, persona, .. } => {
+                    valid_project_path(path)
+                        && persona.as_ref().is_none_or(|persona| {
+                            valid_name(&persona.persona) && valid_name(&persona.file)
+                        })
+                }
             }
     }
 }
@@ -244,6 +347,14 @@ impl TitleCard {
         }
     }
 
+    /// The card is laid out with layers: the title is one of them, and the
+    /// old title, subtitle and label fields are not drawn.
+    pub fn has_title_layer(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|layer| matches!(layer.kind, CoverLayerKind::Title { .. }))
+    }
+
     pub fn validate(&self) -> Result<(), TitleCardError> {
         if !valid_id(&self.id) {
             return Err(TitleCardError::InvalidMetadata("id"));
@@ -286,7 +397,15 @@ impl TitleCard {
         {
             return Err(TitleCardError::InvalidMetadata("subject"));
         }
-        if self.layers.len() > MAX_COVER_LAYERS || !self.layers.iter().all(CoverLayer::validate) {
+        if self.layers.len() > MAX_COVER_LAYERS
+            || !self.layers.iter().all(CoverLayer::validate)
+            || self
+                .layers
+                .iter()
+                .filter(|layer| matches!(layer.kind, CoverLayerKind::Title { .. }))
+                .count()
+                > 1
+        {
             return Err(TitleCardError::InvalidMetadata("layers"));
         }
         Ok(())

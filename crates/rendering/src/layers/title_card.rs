@@ -127,10 +127,10 @@ impl TitleCardLayer {
             .iter()
             .enumerate()
             .filter_map(|(z, layer)| match &layer.kind {
-                CoverLayerKind::Image { path, mirror } => {
+                CoverLayerKind::Image { path, mirror, .. } => {
                     Some((z as u32 + 1, path.clone(), layer.pose, *mirror))
                 }
-                CoverLayerKind::Text { .. } => None,
+                _ => None,
             })
             .collect();
         if pictures.is_empty() {
@@ -148,7 +148,8 @@ impl TitleCardLayer {
                 previous != segment || *size != output || *was_editing != editing
             })
         {
-            let mut texts = if card.hide_title {
+            let layered_title = card.has_title_layer();
+            let mut texts = if card.hide_title || layered_title {
                 Vec::new()
             } else {
                 self.prepare_texts(segment, &layout)?
@@ -174,7 +175,7 @@ impl TitleCardLayer {
             }
             if layered {
                 for (z, layer) in card.layers.iter().enumerate() {
-                    if let Some(text) = self.cover_text(layer, z as u32 + 1, output) {
+                    if let Some(text) = self.cover_text(segment, layer, z as u32 + 1, output) {
                         texts.push(text);
                     }
                 }
@@ -194,7 +195,7 @@ impl TitleCardLayer {
                 TitleCardBackground::ProjectImage { .. } => parse_color("#111827"),
             };
             let mut rectangles = vec![([0.0, 0.0, output.0 as f32, output.1 as f32], color)];
-            let accent = layout.accent.filter(|_| !card.hide_title);
+            let accent = layout.accent.filter(|_| !card.hide_title && !layered_title);
             self.accent = accent.is_some();
             if let Some(bounds) = accent {
                 let mut color = parse_color(&segment.color);
@@ -346,19 +347,18 @@ impl TitleCardLayer {
     /// tall, smaller only when a line would not fit its width.
     fn cover_text(
         &mut self,
+        segment: &TextSegment,
         layer: &cap_project::CoverLayer,
         track: u32,
         output: (u32, u32),
     ) -> Option<PreparedText> {
-        let CoverLayerKind::Text {
-            content,
-            color,
-            stroke,
-            band,
-        } = &layer.kind
-        else {
-            return None;
+        let content = match &layer.kind {
+            CoverLayerKind::Title { .. } => segment.content.as_str(),
+            CoverLayerKind::Text { content, .. } => content.as_str(),
+            CoverLayerKind::Image { .. } => return None,
         };
+        let style = layer.kind.text_style()?;
+        let (color, stroke, band) = (&style.color, &style.stroke, &style.band);
         let content = content.trim();
         if content.is_empty() {
             return None;
@@ -394,7 +394,7 @@ impl TitleCardLayer {
             bounds,
             color: parse_color(color),
             background_color: band.as_deref().map(parse_color),
-            font_family: "Noto Sans SC".into(),
+            font_family: style.font.clone().unwrap_or_else(|| "Noto Sans SC".into()),
             font_size: (height / (lines * line_height)).clamp(4.0, 2000.0),
             font_weight: 900.0,
             italic: false,

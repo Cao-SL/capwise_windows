@@ -608,9 +608,11 @@ pub struct CanvasDrag {
 
 pub(crate) struct CanvasTextEdit {
     pub(crate) index: usize,
+    /// A cover's text layer being typed into, rather than the segment.
+    pub(crate) layer: Option<usize>,
     pub(crate) before: String,
-    input: gpui::Entity<crate::ui::TextInputState>,
-    _subscription: gpui::Subscription,
+    pub(crate) input: gpui::Entity<crate::ui::TextInputState>,
+    pub(crate) _subscription: gpui::Subscription,
 }
 
 impl EditorWindow {
@@ -866,6 +868,12 @@ impl EditorWindow {
             && let CanvasSelection::Text(index) = element
         {
             self.begin_canvas_text_edit(index, window, cx);
+            return;
+        }
+        if event.click_count == 2
+            && let CanvasSelection::CoverLayer(index, layer) = element
+            && self.begin_cover_text_edit(index, layer, window, cx)
+        {
             return;
         }
         let draggable = match element {
@@ -1533,7 +1541,7 @@ impl EditorWindow {
                 if segment
                     .title_card
                     .as_ref()
-                    .is_some_and(|card| card.hide_title)
+                    .is_some_and(|card| card.hide_title || card.has_title_layer())
                 {
                     return None;
                 }
@@ -1823,11 +1831,9 @@ impl EditorWindow {
                             let element = CanvasSelection::Text(index);
                             if let Some(rect) = self.element_rect(element) {
                                 layer = layer.child(
-                                    if self
-                                        .canvas_text_edit
-                                        .as_ref()
-                                        .is_some_and(|edit| edit.index == index)
-                                    {
+                                    if self.canvas_text_edit.as_ref().is_some_and(|edit| {
+                                        edit.index == index && edit.layer.is_none()
+                                    }) {
                                         self.render_canvas_text_input(index, rect, (cw, ch), cx)
                                     } else {
                                         self.render_element_box(element, rect, (cw, ch), cx)
@@ -1842,7 +1848,15 @@ impl EditorWindow {
         if let Some(card) = active_card {
             for element in self.cover_elements(card) {
                 if let Some(rect) = self.element_rect(element) {
-                    layer = layer.child(self.render_element_box(element, rect, (cw, ch), cx));
+                    let typing = self.canvas_text_edit.as_ref().is_some_and(|edit| {
+                        CanvasSelection::CoverLayer(edit.index, edit.layer.unwrap_or(usize::MAX))
+                            == element
+                    });
+                    layer = layer.child(if typing {
+                        self.render_cover_text_input(element, rect, (cw, ch), cx)
+                    } else {
+                        self.render_element_box(element, rect, (cw, ch), cx)
+                    });
                 }
             }
         }
@@ -1914,7 +1928,7 @@ impl EditorWindow {
                 if this
                     .canvas_text_edit
                     .as_ref()
-                    .is_none_or(|edit| edit.index != index)
+                    .is_none_or(|edit| edit.index != index || edit.layer.is_some())
                 {
                     return;
                 }
@@ -1968,6 +1982,7 @@ impl EditorWindow {
         self.history.pause();
         self.canvas_text_edit = Some(CanvasTextEdit {
             index,
+            layer: None,
             before,
             input: input.clone(),
             _subscription: subscription,

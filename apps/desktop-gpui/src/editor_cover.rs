@@ -7,13 +7,11 @@ use std::{
     sync::Arc,
 };
 
-use cap_project::{
-    ProjectConfiguration, TitleCardBackground, TitleCardImageFit, TitleCardTemplate, XY,
-};
+use cap_project::{ProjectConfiguration, TitleCardBackground, TitleCardImageFit, XY};
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, Hsla, InteractiveElement, IntoElement,
-    ParentElement, RenderImage, StatefulInteractiveElement, Styled, StyledImage, Window, div, img,
-    prelude::FluentBuilder, px,
+    ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled, StyledImage,
+    Window, div, img, prelude::FluentBuilder, px,
 };
 
 use crate::{
@@ -416,16 +414,9 @@ impl EditorWindow {
             cx.notify();
             return;
         }
-        let template = self
-            .project
-            .timeline
-            .as_ref()
-            .and_then(|timeline| {
-                timeline.text_segments.iter().find_map(|segment| {
-                    segment.title_card.as_ref().filter(|card| card.id == target)
-                })
-            })
-            .map(|card| card.template);
+        let mode = crate::cover_templates::CoverMode::load();
+        let person = crate::cover_templates::CoverPersona::load()
+            .persona(&self.sidebar.title_cards.subject.persona_list());
         let card = self.project.timeline.as_ref().and_then(|timeline| {
             timeline.text_segments.iter().find(|segment| {
                 segment
@@ -434,23 +425,28 @@ impl EditorWindow {
                     .is_some_and(|card| card.id == target)
             })
         });
+        // A collage asks only for a background and lays the title and the
+        // person over it as layers; a painted cover has both drawn in, and
+        // only then does a photo of the person leave the computer.
+        let painted = mode == crate::cover_templates::CoverMode::Painted;
         let title = card
             .map(|segment| segment.content.trim().to_string())
-            .filter(|title| !title.is_empty() && title.chars().count() <= 80);
-        let reference_path = card
-            .and_then(|segment| segment.title_card.as_ref()?.subject.as_ref())
-            .map(|subject| {
-                self.sidebar
-                    .title_cards
-                    .subject
-                    .placed_source()
-                    .unwrap_or_else(|| self.project_path.join(&subject.path))
-            })
-            .filter(|_| title.is_some());
-        let text_area = match template {
-            Some(TitleCardTemplate::Hero) => TextArea::Center,
-            Some(TitleCardTemplate::Editorial) => TextArea::Left,
-            _ => TextArea::Left,
+            .filter(|title| painted && !title.is_empty() && title.chars().count() <= 80);
+        let reference_path = person
+            .as_ref()
+            .filter(|_| title.is_some())
+            .and_then(|persona| {
+                let poses = &persona.manifest.poses;
+                let pose = poses
+                    .iter()
+                    .find(|pose| pose.expression == crate::personas::Expression::Smile)
+                    .or_else(|| poses.first())?;
+                persona.pose_path(pose)
+            });
+        let text_area = if person.is_some() {
+            TextArea::Left
+        } else {
+            TextArea::Center
         };
         let state = &mut self.sidebar.title_cards.cover;
         let client = match ArkBackgroundClient::for_endpoint(&endpoint.base_url, provider.is_ark())
@@ -797,9 +793,18 @@ impl EditorWindow {
                                     // A finished cover is shown as made; a
                                     // plain background is dimmed under the
                                     // card's own title.
-                                    dim: if finished { 0.0 } else { 0.25 },
+                                    dim: 0.0,
                                 };
                                 card.hide_title = finished;
+                                if finished {
+                                    // The picture already shows the title.
+                                    card.layers.retain(|layer| {
+                                        !matches!(
+                                            layer.kind,
+                                            cap_project::CoverLayerKind::Title { .. }
+                                        )
+                                    });
+                                }
                                 Ok(true)
                             },
                         );
@@ -823,6 +828,23 @@ impl EditorWindow {
                             this.remember_project_asset(record, cx);
                             this.sidebar.title_cards.cover.save_pending = Some(path);
                             this.finish_cover_save(window, cx);
+                            // A fresh card gets its title and person laid out
+                            // over the new background; a cover already
+                            // arranged by hand keeps its layers.
+                            if !finished
+                                && let Some(index) = this.card_index_by_id(&target)
+                                && this.cover_untouched(index)
+                            {
+                                let template = if crate::cover_templates::CoverPersona::load()
+                                    .persona(&this.sidebar.title_cards.subject.persona_list())
+                                    .is_some()
+                                {
+                                    crate::cover_templates::TITLE_LEFT_PERSON_RIGHT
+                                } else {
+                                    crate::cover_templates::HERO_CENTER
+                                };
+                                this.apply_cover_template(index, template, window, cx);
+                            }
                         }
                     }
                     Err(_) => {
@@ -850,6 +872,90 @@ impl EditorWindow {
         state.result = Some(result);
         state.preview = Some(preview);
         self.apply_cover_background(window, cx);
+    }
+
+    /// Who goes on a generated cover and how it is made, remembered for
+    /// every project.
+    pub(crate) fn render_cover_ai_choices(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::cover_templates::{CoverMode, CoverPersona};
+        let theme = self.theme;
+        let persona = CoverPersona::load();
+        let mode = CoverMode::load();
+        let has_mine = CoverPersona::Mine
+            .persona(&self.sidebar.title_cards.subject.persona_list())
+            .is_some();
+        let chip = |id: SharedString, label: &'static str, pressed: bool| {
+            ui::EditorButton::plain(&theme, id)
+                .choice(&theme)
+                .height(px(26.))
+                .text_size(px(12.))
+                .label(label)
+                .pressed(pressed)
+        };
+        let people =
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.))
+                .children(CoverPersona::all().into_iter().map(|choice| {
+                    chip(
+                        SharedString::from(format!("cover-ai-person-{choice:?}")),
+                        choice.label(),
+                        persona == choice,
+                    )
+                    .disabled(choice == CoverPersona::Mine && !has_mine)
+                    .when(choice == CoverPersona::Mine && !has_mine, |button| {
+                        button.tooltip(&theme, tr::editor::cover_templates::mine_empty())
+                    })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        choice.save();
+                        cx.notify();
+                    }))
+                }));
+        let modes = div().flex().flex_wrap().gap(px(6.)).children(
+            [
+                (
+                    CoverMode::Collage,
+                    tr::editor::cover_templates::mode_collage(),
+                ),
+                (
+                    CoverMode::Painted,
+                    tr::editor::cover_templates::mode_painted(),
+                ),
+            ]
+            .into_iter()
+            .map(|(choice, label)| {
+                chip(
+                    SharedString::from(format!("cover-ai-mode-{choice:?}")),
+                    label,
+                    mode == choice,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    choice.save();
+                    cx.notify();
+                }))
+            }),
+        );
+        let note = (mode == CoverMode::Painted).then(|| {
+            let mut text = tr::editor::cover_templates::painted_note().to_string();
+            if persona != CoverPersona::None {
+                text.push(' ');
+                text.push_str(tr::editor::title_cards::subject_privacy());
+            }
+            div()
+                .text_size(px(11.))
+                .line_height(px(16.))
+                .text_color(Hsla::from(theme.editor.text_3))
+                .child(text)
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(ui::Field::stacked(&theme, tr::editor::cover_templates::person()).child(people))
+            .child(ui::Field::stacked(&theme, tr::editor::cover_templates::mode()).child(modes))
+            .children(note)
+            .into_any_element()
     }
 
     pub(crate) fn assistant_cover_busy(&self) -> bool {
@@ -1227,6 +1333,7 @@ mod tests {
                     color: "#FFFFFF".into(),
                     stroke: None,
                     band: None,
+                    font: None,
                 },
             ));
         assert_eq!(

@@ -3175,7 +3175,20 @@ impl EditorWindow {
         };
         let mut preview = self.project.clone();
         preview.editing_caption = self.caption_edit_hides_caption();
-        if let Some(edit) = &self.canvas_text_edit {
+        if let Some(edit) = &self.canvas_text_edit
+            && let Some(layer) = edit.layer
+        {
+            // The words being typed show in the box, not under it.
+            if let Some(item) = preview
+                .timeline
+                .as_mut()
+                .and_then(|timeline| timeline.text_segments.get_mut(edit.index))
+                .and_then(|segment| segment.title_card.as_mut())
+                .and_then(|card| card.layers.get_mut(layer))
+            {
+                item.pose.opacity = 0.0;
+            }
+        } else if let Some(edit) = &self.canvas_text_edit {
             preview.editing_text_segment = Some(edit.index);
             if let Some(segment) = preview
                 .timeline
