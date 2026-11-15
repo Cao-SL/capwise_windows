@@ -61,7 +61,7 @@ pub mod spring_mass_damper;
 mod takeover;
 mod text;
 mod title_cards;
-pub use title_cards::title_card_text_bounds;
+pub use title_cards::{title_card_subject_bounds, title_card_text_bounds};
 mod transition;
 #[cfg(test)]
 mod transition_render_tests;

@@ -2819,6 +2819,8 @@ pub enum FieldKey {
     TitleCardSubtitle(usize),
     TitleCardKicker(usize),
     TitleCardDuration(usize),
+    /// A text layer on a cover: the card's text segment and the layer.
+    CoverLayerText(usize, usize),
     CaptionText(usize),
     /// Single-line names and labels.
     AudioName(usize),
@@ -3029,6 +3031,9 @@ impl EditorWindow {
                         .as_ref()?
                         .kicker,
                 );
+            }
+            FieldKey::CoverLayerText(index, layer) => {
+                out.push_str(self.cover_layer_text(index, layer)?);
             }
             FieldKey::TitleCardDuration(index) => {
                 let segment = timeline.text_segments.get(index)?;
@@ -3250,6 +3255,9 @@ impl EditorWindow {
             | FieldKey::TitleCardKicker(index)
             | FieldKey::TitleCardDuration(index) => {
                 self.commit_title_card_field(index, key, text, final_commit, window, cx);
+            }
+            FieldKey::CoverLayerText(index, layer) => {
+                self.commit_cover_layer_text(index, layer, text, window, cx);
             }
             FieldKey::CaptionText(index) => {
                 if self.edit_caption_text_live(index, text) {

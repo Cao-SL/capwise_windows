@@ -7730,6 +7730,9 @@ impl EditorWindow {
     /// them in reverse and refuses to empty itself, and the scene track's
     /// action takes one index at a time for the same reason.
     pub(crate) fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.delete_cover_selection(window, cx) {
+            return;
+        }
         if let Some(popover) = self.transition_popover.take() {
             self.set_clip_transition(popover.index, None, window, cx);
             cx.notify();

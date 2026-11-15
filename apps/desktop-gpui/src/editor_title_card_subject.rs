@@ -29,6 +29,21 @@ impl SubjectUi {
         self.personas.get_or_init(personas::all)
     }
 
+    pub(crate) fn persona_list(&self) -> Vec<Persona> {
+        self.personas().to_vec()
+    }
+
+    pub(crate) fn persona_ids(&self) -> Vec<String> {
+        self.personas()
+            .iter()
+            .map(|persona| persona.id.clone())
+            .collect()
+    }
+
+    pub(crate) fn forget_placed(&mut self) {
+        self.placed = None;
+    }
+
     /// The clean pose behind the placed cutout (no sticker outline), when
     /// this session placed it -- the better reference for a generated cover.
     pub(crate) fn placed_source(&self) -> Option<std::path::PathBuf> {
@@ -112,7 +127,7 @@ impl EditorWindow {
             this.update_in(cx, |this, window, cx| {
                 this.sidebar.title_cards.subject.busy = false;
                 match placed {
-                    Ok(record) => {
+                    Ok((record, _)) => {
                         this.remember_project_asset(record.clone(), cx);
                         let current = this.project.timeline.as_ref().and_then(|timeline| {
                             timeline.text_segments.iter().position(|segment| {
@@ -136,6 +151,7 @@ impl EditorWindow {
                                 path: record.path,
                                 side,
                                 mirror: personas::mirror_for(facing, side),
+                                pose: None,
                             });
                         });
                     }

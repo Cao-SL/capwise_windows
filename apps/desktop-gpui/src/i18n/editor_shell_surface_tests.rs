@@ -166,6 +166,8 @@ fn editor_shell_surfaces_match_the_literals_they_replaced() {
             "Screen is locked while a zoom is active",
         ),
         (tr::editor::canvas::text_item(), "Text"),
+        (tr::editor::canvas::person(), "Person"),
+        (tr::editor::canvas::cover_layer(), "Element"),
         (tr::editor::clips::append_error_title(), "Recording Error"),
         (tr::editor::clips::back(), "Back to editor"),
         (tr::editor::clips::cap_filter(), "Capwise Recording"),

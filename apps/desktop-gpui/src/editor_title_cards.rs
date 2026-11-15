@@ -45,6 +45,7 @@ pub(crate) struct TitleCardUi {
     pub(crate) cover: crate::editor_cover::CoverUi,
     pub(crate) library: crate::editor_title_card_presets::TitleCardLibraryUi,
     pub(crate) subject: crate::editor_title_card_subject::SubjectUi,
+    pub(crate) layers: crate::editor_cover_layers::CoverLayerUi,
     pub(crate) error: Option<String>,
     pub(crate) picking_image: bool,
     pub(crate) applying: bool,
@@ -1122,6 +1123,7 @@ impl EditorWindow {
             .when(role == TitleCardRole::Intro, |this| {
                 this.child(self.render_title_card_subject(index, card.subject.as_ref(), cx))
             })
+            .child(self.render_cover_layers(index, card, cx))
             .when(card.hide_title, |this| {
                 this.child(
                     div()

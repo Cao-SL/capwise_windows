@@ -78,8 +78,22 @@ fn context_for(
                 .as_ref()
                 .is_some_and(|card| card.id == target)
         })?;
+    // Layers placed over a cover, and where the person was dragged, never
+    // reach the image request, so moving them while it runs keeps the result.
+    let mut unplaced = project.clone();
+    for card in unplaced
+        .timeline
+        .iter_mut()
+        .flat_map(|timeline| timeline.text_segments.iter_mut())
+        .filter_map(|segment| segment.title_card.as_mut())
+    {
+        card.layers.clear();
+        if let Some(subject) = card.subject.as_mut() {
+            subject.pose = None;
+        }
+    }
     let mut hash = DefaultHasher::new();
-    serde_json::to_vec(project).ok()?.hash(&mut hash);
+    serde_json::to_vec(&unplaced).ok()?.hash(&mut hash);
     Some(GenerationContext {
         project_id: path.to_string_lossy().into_owned(),
         target_id: target.into(),
@@ -1192,6 +1206,32 @@ mod tests {
         assert_ne!(
             initial.revision,
             context_for(Path::new("synthetic.cap"), &edited, &target)
+                .unwrap()
+                .revision
+        );
+        let mut layered = project.clone();
+        layered.timeline.as_mut().unwrap().text_segments[0]
+            .title_card
+            .as_mut()
+            .unwrap()
+            .layers
+            .push(cap_project::CoverLayer::new(
+                cap_project::LayerPose {
+                    center: XY::new(0.5, 0.5),
+                    size: XY::new(0.2, 0.1),
+                    rotation: 0.0,
+                    opacity: 1.0,
+                },
+                cap_project::CoverLayerKind::Text {
+                    content: "新".into(),
+                    color: "#FFFFFF".into(),
+                    stroke: None,
+                    band: None,
+                },
+            ));
+        assert_eq!(
+            initial.revision,
+            context_for(Path::new("synthetic.cap"), &layered, &target)
                 .unwrap()
                 .revision
         );

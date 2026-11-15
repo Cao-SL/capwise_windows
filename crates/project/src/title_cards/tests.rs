@@ -387,6 +387,7 @@ fn card_subject_is_optional_roundtrips_and_rejects_unsafe_paths() {
             path: "content/images/person.png".into(),
             side: TitleCardSubjectSide::Right,
             mirror: false,
+            pose: None,
         })
     );
     let encoded = value(&reopened);
@@ -513,4 +514,56 @@ fn adding_a_card_migrates_legacy_body_text_once_without_rescaling_the_card() {
         reopened.title_card(TitleCardRole::Intro).unwrap().font_size,
         96.0
     );
+}
+
+#[test]
+fn cover_layers_are_optional_roundtrip_and_reject_unsafe_values() {
+    let segment = card(TitleCardRole::Intro, 2.0);
+    let legacy = value(&segment);
+    assert!(legacy["titleCard"].get("layers").is_none());
+    let reopened: TextSegment = serde_json::from_value(legacy).unwrap();
+    assert!(reopened.title_card.unwrap().layers.is_empty());
+
+    let pose = json!({"center": {"x": 0.3, "y": 0.4}, "size": {"x": 0.2, "y": 0.1}});
+    let mut data = value(&segment);
+    data["titleCard"]["layers"] = json!([
+        {"id": "a1", "pose": pose, "kind": {"type": "text", "content": "震惊"}},
+        {"id": "b2", "pose": pose, "kind": {"type": "image", "path": "content/images/x.png", "mirror": true}},
+    ]);
+    let reopened: TextSegment = serde_json::from_value(data).unwrap();
+    let layers = &reopened.title_card.as_ref().unwrap().layers;
+    assert_eq!(layers.len(), 2);
+    assert!(matches!(
+        &layers[0].kind,
+        CoverLayerKind::Text { color, stroke: None, .. } if color == "#FFFFFF"
+    ));
+    let encoded = value(&reopened);
+    assert_eq!(
+        encoded["titleCard"]["layers"][1]["kind"]["type"],
+        json!("image")
+    );
+    assert_eq!(
+        serde_json::from_value::<TextSegment>(encoded).unwrap(),
+        reopened
+    );
+
+    let bad = [
+        json!({"id": "a", "pose": pose, "kind": {"type": "image", "path": "../x.png"}}),
+        json!({"id": "a b", "pose": pose, "kind": {"type": "text", "content": "x"}}),
+        json!({"id": "a", "pose": pose, "kind": {"type": "text", "content": "x", "color": "red"}}),
+        json!({"id": "a", "pose": {"center": {"x": 0.5, "y": 0.5}, "size": {"x": 0.0, "y": 0.1}},
+               "kind": {"type": "text", "content": "x"}}),
+    ];
+    for layer in bad {
+        let mut data = value(&segment);
+        data["titleCard"]["layers"] = json!([layer]);
+        assert!(serde_json::from_value::<TextSegment>(data).is_err());
+    }
+    let mut data = value(&segment);
+    data["titleCard"]["layers"] = json!(
+        (0..=MAX_COVER_LAYERS)
+            .map(|i| json!({"id": format!("l{i}"), "pose": pose, "kind": {"type": "text", "content": "x"}}))
+            .collect::<Vec<_>>()
+    );
+    assert!(serde_json::from_value::<TextSegment>(data).is_err());
 }

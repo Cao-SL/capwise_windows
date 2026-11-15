@@ -529,9 +529,21 @@ pub enum CanvasSelection {
     Image(usize),
     Captions,
     Shape(usize),
+    /// A layer on a cover: the card's text segment and the layer.
+    CoverLayer(usize, usize),
+    /// The person standing beside a cover's title.
+    CoverSubject(usize),
 }
 
 impl CanvasSelection {
+    /// The cover card a cover element belongs to.
+    pub(crate) fn cover_card(self) -> Option<usize> {
+        match self {
+            Self::CoverLayer(index, _) | Self::CoverSubject(index) => Some(index),
+            _ => None,
+        }
+    }
+
     fn label(self) -> SharedString {
         match self {
             Self::Display => tr::editor::canvas::screen().into(),
@@ -541,6 +553,8 @@ impl CanvasSelection {
             Self::Image(_) => tr::editor::canvas::image().into(),
             Self::Captions => tr::editor::canvas::captions().into(),
             Self::Shape(_) => tr::editor::canvas::shape().into(),
+            Self::CoverLayer(..) => tr::editor::canvas::cover_layer().into(),
+            Self::CoverSubject(_) => tr::editor::canvas::person().into(),
         }
     }
 
@@ -553,6 +567,8 @@ impl CanvasSelection {
             Self::Image(index) => format!("canvas-image-{index}").into(),
             Self::Captions => "canvas-captions".into(),
             Self::Shape(index) => format!("canvas-shape-{index}").into(),
+            Self::CoverLayer(index, layer) => format!("canvas-cover-{index}-{layer}").into(),
+            Self::CoverSubject(index) => format!("canvas-cover-subject-{index}").into(),
         }
     }
 
@@ -824,7 +840,17 @@ impl EditorWindow {
             self.caption_press = true;
             self.canvas_selection = Some(element);
         }
-        if let Some((kind, index)) = element.timeline_selection() {
+        if let Some(card) = element.cover_card() {
+            // The card stays selected so its panel stays open.
+            self.set_selection(
+                Some(crate::editor_edits::Selection::single(
+                    TrackKind::Text,
+                    card,
+                )),
+                cx,
+            );
+            self.canvas_selection = Some(element);
+        } else if let Some((kind, index)) = element.timeline_selection() {
             self.canvas_selection = Some(element);
             self.set_selection(
                 Some(crate::editor_edits::Selection::single(kind, index)),
@@ -849,7 +875,9 @@ impl EditorWindow {
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
             | CanvasSelection::Captions => true,
-            CanvasSelection::Shape(_) => true,
+            CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => true,
         };
         if !draggable {
             cx.notify();
@@ -887,13 +915,24 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => true,
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => true,
             CanvasSelection::Captions => false,
         };
         if !resizable {
             return;
         }
-        if let Some((kind, index)) = element.timeline_selection() {
+        if let Some(card) = element.cover_card() {
+            self.set_selection(
+                Some(crate::editor_edits::Selection::single(
+                    TrackKind::Text,
+                    card,
+                )),
+                cx,
+            );
+            self.canvas_selection = Some(element);
+        } else if let Some((kind, index)) = element.timeline_selection() {
             self.canvas_selection = Some(element);
             self.set_selection(
                 Some(crate::editor_edits::Selection::single(kind, index)),
@@ -1075,6 +1114,16 @@ impl EditorWindow {
                         cx,
                     );
                 }
+                CanvasSelection::CoverLayer(..) | CanvasSelection::CoverSubject(_) => {
+                    let rect = if self.cover_keeps_shape(element) {
+                        image_resize_rect(start, size, delta, (dir_x, dir_y), 0., true)
+                    } else {
+                        overlay_resize_rect(start, size, delta, dir_x, dir_y, &targets, shift).0
+                    };
+                    self.snap_guides.clear();
+                    self.canvas_overlay_rect = Some(rect);
+                    self.write_overlay_rect(element, rect, cx);
+                }
                 CanvasSelection::Mask(_)
                 | CanvasSelection::Text(_)
                 | CanvasSelection::Image(_)
@@ -1115,6 +1164,9 @@ impl EditorWindow {
         let (center, guides) = match element {
             CanvasSelection::Display => display_drag_center(start, size, delta, &targets, shift),
             CanvasSelection::Camera => camera_drag_center(start, size, delta, &targets, shift),
+            CanvasSelection::CoverLayer(..) | CanvasSelection::CoverSubject(_) => {
+                overlay_drag_center(start, size, delta, &targets, shift)
+            }
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
@@ -1149,7 +1201,9 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => {
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => {
                 self.canvas_overlay_rect = Some(optimistic);
                 self.write_overlay_rect(element, optimistic, cx);
             }
@@ -1222,6 +1276,12 @@ impl EditorWindow {
                 CanvasSelection::Shape(index) => {
                     tracing::info!(index, "canvas shape drag");
                 }
+                CanvasSelection::CoverLayer(index, layer) => {
+                    tracing::info!(index, layer, "canvas cover layer drag");
+                }
+                CanvasSelection::CoverSubject(index) => {
+                    tracing::info!(index, "canvas cover subject drag");
+                }
             }
         }
         cx.notify();
@@ -1275,7 +1335,9 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => overlay_nudge_center(rect, direction, shift),
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => overlay_nudge_center(rect, direction, shift),
             CanvasSelection::Captions => caption_nudge_center(rect, size, direction, shift),
         };
         let optimistic = NormRect {
@@ -1295,7 +1357,9 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => {
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => {
                 self.canvas_overlay_rect = Some(optimistic);
                 self.write_overlay_rect(selected, optimistic, cx);
             }
@@ -1489,6 +1553,17 @@ impl EditorWindow {
                 })
             }
             CanvasSelection::Captions => self.caption_rect(),
+            CanvasSelection::CoverLayer(..) | CanvasSelection::CoverSubject(_) => {
+                if self
+                    .canvas_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.element == element)
+                    && let Some(rect) = self.canvas_overlay_rect
+                {
+                    return Some(rect);
+                }
+                self.cover_element_rect(element)
+            }
         }
     }
 
@@ -1507,6 +1582,12 @@ impl EditorWindow {
             y: rect.h.max(0.01),
         };
         let time = self.preview_or_playhead();
+        if element.cover_card().is_some() {
+            if self.write_cover_pose(element, center, size) {
+                self.project_changed_live(cx);
+            }
+            return;
+        }
         let Some(timeline) = self.project.timeline.as_mut() else {
             return;
         };
@@ -1755,6 +1836,13 @@ impl EditorWindow {
                             }
                         }
                     }
+                }
+            }
+        }
+        if let Some(card) = active_card {
+            for element in self.cover_elements(card) {
+                if let Some(rect) = self.element_rect(element) {
+                    layer = layer.child(self.render_element_box(element, rect, (cw, ch), cx));
                 }
             }
         }
@@ -2010,7 +2098,9 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => (true, true, None),
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => (true, true, None),
             CanvasSelection::Captions => (true, false, None),
         };
         let has_handles = element != CanvasSelection::Captions;

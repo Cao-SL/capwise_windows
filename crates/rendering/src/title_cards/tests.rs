@@ -367,6 +367,7 @@ fn a_subject_takes_one_side_and_the_title_the_other() {
                 path: "content/images/person.png".into(),
                 side,
                 mirror: false,
+                pose: None,
             });
             let output = (1920, 1080);
             let layout = segment_title_card_layout(output, &segment).unwrap();
@@ -387,6 +388,7 @@ fn a_subject_takes_one_side_and_the_title_the_other() {
         path: "content/images/person.png".into(),
         side: TitleCardSubjectSide::Right,
         mirror: false,
+        pose: None,
     });
     let layout = segment_title_card_layout((1080, 1920), &tall).unwrap();
     let (region, _) = layout.subject.unwrap();

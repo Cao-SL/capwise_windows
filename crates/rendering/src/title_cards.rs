@@ -126,6 +126,18 @@ pub fn title_card_text_bounds(output: (u32, u32), segment: &TextSegment) -> Opti
     Some(text_group_bounds(&layout))
 }
 
+/// Where the card's person stands when it has not been dragged: the source
+/// cutout's pixel size decides the box.
+pub fn title_card_subject_bounds(
+    output: (u32, u32),
+    segment: &TextSegment,
+    source: (u32, u32),
+) -> Option<[f32; 4]> {
+    let layout = segment_title_card_layout(output, segment)?;
+    let (region, side) = layout.subject?;
+    subject_placement(source, region, side)
+}
+
 fn text_group_bounds(layout: &TitleCardLayout) -> [f32; 4] {
     let mut bounds = layout.text;
     if let Some(secondary) = layout.secondary {

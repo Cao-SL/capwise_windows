@@ -184,7 +184,7 @@ pub(crate) fn place_in_project(
     project: &Path,
     persona: &Persona,
     pose: &Pose,
-) -> Result<AssetRecord, String> {
+) -> Result<(AssetRecord, (u32, u32)), String> {
     let source = persona
         .pose_path(pose)
         .ok_or_else(|| "This pose is missing".to_string())?;
@@ -201,9 +201,20 @@ pub(crate) fn place_in_project(
         )
         .map_err(|error| error.to_string())?;
     let name = persona.display_name().to_owned();
+    save_layer_image(project, bytes, name)
+}
+
+/// Copies an encoded image into the project's pictures and lists it in the
+/// project's assets. Returns the record and the picture's pixel size.
+pub(crate) fn save_layer_image(
+    project: &Path,
+    bytes: Vec<u8>,
+    name: String,
+) -> Result<(AssetRecord, (u32, u32)), String> {
     let image = cap_project::OverlayImage::from_bytes(bytes, name)?;
     let imported = crate::import::save_editor_image(project, image)?;
-    asset_library::ensure_record(
+    let size = (imported.width, imported.height);
+    let record = asset_library::ensure_record(
         project,
         &AssetRecord {
             path: imported.path,
@@ -212,7 +223,8 @@ pub(crate) fn place_in_project(
             source: None,
             rendition: None,
         },
-    )
+    )?;
+    Ok((record, size))
 }
 
 /// A white rim around the cutout's silhouette: the sticker edge that keeps
