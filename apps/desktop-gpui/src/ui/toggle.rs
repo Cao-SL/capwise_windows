@@ -63,6 +63,7 @@ pub struct Toggle {
     thumb: Hsla,
     disabled: bool,
     label: Option<SharedString>,
+    focusable: bool,
     on_click: Option<crate::ui::button::ClickHandler>,
 }
 
@@ -78,6 +79,7 @@ impl Toggle {
             thumb: gpui::white(),
             disabled: false,
             label: None,
+            focusable: false,
             on_click: None,
         }
     }
@@ -130,6 +132,11 @@ impl Toggle {
         self
     }
 
+    pub fn focusable(mut self) -> Self {
+        self.focusable = true;
+        self
+    }
+
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -150,6 +157,7 @@ impl RenderOnce for Toggle {
             thumb,
             disabled,
             label,
+            focusable,
             on_click,
         } = self;
         let (width, height, padding) = size.track();
@@ -157,7 +165,7 @@ impl RenderOnce for Toggle {
         div()
             .id(id)
             .when(
-                keyboard_nav::active(window, cx) && !disabled,
+                (focusable || keyboard_nav::active(window, cx)) && !disabled,
                 keyboard_nav::stop,
             )
             .role(gpui::Role::Switch)

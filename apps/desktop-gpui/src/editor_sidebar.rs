@@ -773,6 +773,7 @@ pub enum ColorTarget {
     TitleCardBackground(usize),
     CoverText(usize, usize),
     CoverStroke(usize, usize),
+    CoverBackground(usize, usize),
     /// The outline colour, only reachable while `stroke_width > 0`.
     TextStroke(usize),
     /// The right-hand stop of the horizontal gradient, only reachable while
@@ -1819,7 +1820,14 @@ impl EditorWindow {
             picker.sat = sat;
             picker.val = val;
         }
-        if !self.sidebar.color_paused {
+        if !self.sidebar.color_paused
+            && !matches!(
+                target,
+                ColorTarget::CoverText(..)
+                    | ColorTarget::CoverStroke(..)
+                    | ColorTarget::CoverBackground(..)
+            )
+        {
             self.history.pause();
             self.sidebar.color_paused = true;
         }
@@ -1961,13 +1969,17 @@ impl EditorWindow {
                     cap_project::TitleCardBackground::ProjectImage { .. } => None,
                 }),
             ColorTarget::CoverText(index, layer) => self
-                .cover_layer(index, layer)
+                .cover_appearance(index, layer)
                 .and_then(|item| item.kind.text_style())
                 .map(|style| style.color),
             ColorTarget::CoverStroke(index, layer) => self
-                .cover_layer(index, layer)
+                .cover_appearance(index, layer)
                 .and_then(|item| item.kind.text_style())
                 .map(|style| style.stroke.unwrap_or("#111111".into())),
+            ColorTarget::CoverBackground(index, layer) => self
+                .cover_appearance(index, layer)
+                .and_then(|item| item.kind.text_style())
+                .and_then(|style| style.band),
             ColorTarget::TextBackground(index) => self
                 .project
                 .timeline
@@ -2151,16 +2163,17 @@ impl EditorWindow {
                         cap_project::TitleCardBackground::Solid { color: hex };
                 });
             }
-            ColorTarget::CoverText(index, layer) | ColorTarget::CoverStroke(index, layer) => {
-                self.edit_cover_layer(index, layer, window, cx, move |layers, layer| {
-                    let item = &mut layers[layer];
-                    if let Some(mut style) = item.kind.text_style() {
-                        if matches!(target, ColorTarget::CoverText(..)) {
-                            style.color = hex;
-                        } else {
-                            style.stroke = Some(hex);
+            ColorTarget::CoverText(index, layer)
+            | ColorTarget::CoverStroke(index, layer)
+            | ColorTarget::CoverBackground(index, layer) => {
+                self.edit_cover_appearance(index, layer, cx, move |item, style| match target {
+                    ColorTarget::CoverText(..) => style.color = hex,
+                    ColorTarget::CoverBackground(..) => style.band = Some(hex),
+                    _ => {
+                        style.stroke = Some(hex);
+                        if item.stroke_width == Some(0.) {
+                            item.stroke_width = None;
                         }
-                        item.kind.set_text_style(style);
                     }
                 });
             }

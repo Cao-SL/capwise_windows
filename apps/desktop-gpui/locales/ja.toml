@@ -3357,11 +3357,15 @@ memory_stop = "深刻なメモリ圧力が続いたため、書き出しを停�
 [editor.cover_controls]
 lock = "ロック"
 unlock = "ロック解除"
-custom = "カスタム"
+custom = "カスタム文字スタイル"
 font_size = "文字サイズ"
 text_color = "文字色"
 stroke_width = "縁取りの太さ"
 stroke_color = "縁取りの色"
+font = "フォント"
+background = "文字の背景"
+background_color = "背景色"
+opacity = "背景の不透明度"
 apply = "適用"
 
 [editor.title_cards]

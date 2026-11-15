@@ -2861,16 +2861,7 @@ impl EditorWindow {
                 .cursor(drag_cursor.unwrap_or(CursorStyle::OpenHand)),
         );
         for handle in HANDLES.iter().rev() {
-            let rect = editor_handle_rect(*handle, bounds);
-            layers = layers.child(
-                div()
-                    .absolute()
-                    .left(px((bounds.x + rect.x) as f32))
-                    .top(px((bounds.y + rect.y) as f32))
-                    .w(px(rect.width as f32))
-                    .h(px(rect.height as f32))
-                    .cursor(drag_cursor.unwrap_or(handle.direction.cursor())),
-            );
+            layers = layers.child(editor_handle_zone(*handle, bounds, drag_cursor));
         }
 
         div()
@@ -3323,7 +3314,7 @@ fn editor_handle_rect(handle: Handle, bounds: CropBounds) -> LocalRect {
     rect
 }
 
-fn editor_hit_test(point: Vec2, bounds: CropBounds) -> CropHit {
+pub(crate) fn editor_hit_test(point: Vec2, bounds: CropBounds) -> CropHit {
     for handle in HANDLES {
         if editor_handle_rect(handle, bounds).contains(point.x - bounds.x, point.y - bounds.y) {
             return CropHit::Handle(handle);
@@ -3332,7 +3323,22 @@ fn editor_hit_test(point: Vec2, bounds: CropBounds) -> CropHit {
     hit_test(point, bounds)
 }
 
-fn editor_handle_glyph(handle: Handle, bounds: CropBounds) -> gpui::Div {
+pub(crate) fn editor_handle_zone(
+    handle: Handle,
+    bounds: CropBounds,
+    drag_cursor: Option<CursorStyle>,
+) -> gpui::Div {
+    let rect = editor_handle_rect(handle, bounds);
+    div()
+        .absolute()
+        .left(px((bounds.x + rect.x) as f32))
+        .top(px((bounds.y + rect.y) as f32))
+        .w(px(rect.width as f32))
+        .h(px(rect.height as f32))
+        .cursor(drag_cursor.unwrap_or(handle.direction.cursor()))
+}
+
+pub(crate) fn editor_handle_glyph(handle: Handle, bounds: CropBounds) -> gpui::Div {
     let outline = gpui::rgb(0x111827);
     if handle.is_corner {
         return div().absolute().inset_0().children(
@@ -3365,7 +3371,7 @@ fn editor_handle_glyph(handle: Handle, bounds: CropBounds) -> gpui::Div {
         .bg(gpui::rgb(0xffffff))
 }
 
-fn editor_thirds_grid(bounds: CropBounds) -> gpui::Div {
+pub(crate) fn editor_thirds_grid(bounds: CropBounds) -> gpui::Div {
     let mut grid = div().absolute().inset_0();
     for fraction in [1. / 3., 2. / 3.] {
         grid = grid.child(

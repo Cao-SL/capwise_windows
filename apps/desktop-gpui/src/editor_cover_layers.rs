@@ -2,6 +2,10 @@
 //! They sit over whatever the cover shows -- a template, a generated
 //! background or a finished cover image -- and move and scale on the canvas.
 
+mod text_style;
+
+use text_style::CoverTextDialog;
+
 use std::path::{Path, PathBuf};
 
 use cap_project::{CoverLayer, CoverLayerKind, CoverPersonaRef, CoverTextStyle, LayerPose, XY};
@@ -42,7 +46,7 @@ pub(crate) struct CoverLayerUi {
     /// The persona grid is open to add a person as a layer.
     adding_person: Option<String>,
     busy: bool,
-    custom_text: bool,
+    pub(crate) text_dialog: Option<CoverTextDialog>,
     pub(crate) crop: Option<crate::editor_cover_crop::CoverCrop>,
     pub(crate) menu: Option<(CanvasSelection, ui::MenuState)>,
     /// Pixel sizes of placed people, read once from their files.
@@ -1249,7 +1253,8 @@ impl EditorWindow {
                     let current = style.color == *fill
                         && style.stroke.as_deref() == *outline
                         && style.band.as_deref() == *back
-                        && item.stroke_width.is_none();
+                        && item.stroke_width.is_none()
+                        && item.band_opacity.is_none();
                     let (fill, outline, back) = (*fill, *outline, *back);
                     let font = style.font.clone();
                     div()
@@ -1287,6 +1292,7 @@ impl EditorWindow {
                                 move |layers, layer| {
                                     layers[layer].kind.set_text_style(next);
                                     layers[layer].stroke_width = None;
+                                    layers[layer].band_opacity = None;
                                 },
                             );
                         }))
@@ -1319,62 +1325,14 @@ impl EditorWindow {
                 .child(self.render_field_input(field, Some(52.)))
                 .child(div().flex().gap(px(6.)).children(styles))
                 .child(div().flex().flex_wrap().gap(px(6.)).children(fonts));
-            let custom = self.sidebar.title_cards.layers.custom_text;
             body = body.child(
                 ui::EditorButton::plain(&theme, "cover-custom-text")
                     .outlined(&theme)
-                    .pressed(custom)
                     .label(tr::editor::cover_controls::custom())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar.title_cards.layers.custom_text =
-                            !this.sidebar.title_cards.layers.custom_text;
-                        cx.notify();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_cover_text_dialog(index, layer, window, cx);
                     })),
             );
-            if custom {
-                use crate::editor_sidebar::ColorTarget;
-                body = body
-                    .child(self.menu_select_owned(
-                        crate::editor_tabs::SidebarMenu::CoverFontFamily(index, layer),
-                        "cover-custom-font".into(),
-                        crate::editor_panels::font_family_label(&current_font).into(),
-                        cx,
-                    ))
-                    .child(
-                        ui::Field::stacked(&theme, tr::editor::cover_controls::font_size()).child(
-                            self.render_number_field(
-                                FieldKey::CoverTextSize(index, layer),
-                                "px",
-                                76.,
-                            ),
-                        ),
-                    )
-                    .child(
-                        ui::Field::stacked(&theme, tr::editor::cover_controls::text_color()).child(
-                            self.render_color_input(
-                                ColorTarget::CoverText(index, layer),
-                                &style.color,
-                                cx,
-                            ),
-                        ),
-                    )
-                    .child(
-                        ui::Field::stacked(&theme, tr::editor::cover_controls::stroke_width())
-                            .child(self.render_number_field(
-                                FieldKey::CoverStrokeWidth(index, layer),
-                                "px",
-                                76.,
-                            )),
-                    )
-                    .child(
-                        ui::Field::stacked(&theme, tr::editor::cover_controls::stroke_color())
-                            .child(self.render_color_input(
-                                ColorTarget::CoverStroke(index, layer),
-                                style.stroke.as_deref().unwrap_or("#111111"),
-                                cx,
-                            )),
-                    );
-            }
         }
         if let CoverLayerKind::Image {
             persona: Some(reference),

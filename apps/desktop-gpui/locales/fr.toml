@@ -3357,11 +3357,15 @@ memory_stop = "L’exportation s’est arrêtée car la pression mémoire reste 
 [editor.cover_controls]
 lock = "Verrouiller"
 unlock = "Déverrouiller"
-custom = "Personnaliser"
+custom = "Style de texte personnalisé"
 font_size = "Taille du texte"
 text_color = "Couleur du texte"
 stroke_width = "Épaisseur du contour"
 stroke_color = "Couleur du contour"
+font = "Police"
+background = "Arrière-plan du texte"
+background_color = "Couleur de fond"
+opacity = "Opacité du fond"
 apply = "Appliquer"
 
 [editor.title_cards]

@@ -397,7 +397,11 @@ impl TitleCardLayer {
             content: content.to_owned(),
             bounds,
             color: parse_color(color),
-            background_color: band.as_deref().map(parse_color),
+            background_color: band.as_deref().map(|band| {
+                let mut color = parse_color(band);
+                color[3] *= layer.band_opacity.unwrap_or(1.0);
+                color
+            }),
             font_family: style.font.clone().unwrap_or_else(|| "Noto Sans SC".into()),
             font_size: layer
                 .font_size

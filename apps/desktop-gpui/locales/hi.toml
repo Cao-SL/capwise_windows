@@ -3357,11 +3357,15 @@ memory_stop = "मेमोरी पर दबाव लगातार गं�
 [editor.cover_controls]
 lock = "लॉक करें"
 unlock = "अनलॉक करें"
-custom = "कस्टम"
+custom = "कस्टम टेक्स्ट शैली"
 font_size = "फ़ॉन्ट का आकार"
 text_color = "टेक्स्ट का रंग"
 stroke_width = "आउटलाइन की मोटाई"
 stroke_color = "आउटलाइन का रंग"
+font = "फ़ॉन्ट"
+background = "टेक्स्ट की पृष्ठभूमि"
+background_color = "पृष्ठभूमि का रंग"
+opacity = "पृष्ठभूमि की अपारदर्शिता"
 apply = "लागू करें"
 
 [editor.title_cards]

@@ -3188,6 +3188,16 @@ impl EditorWindow {
             return;
         };
         let mut preview = self.project.clone();
+        if let Some(dialog) = &self.sidebar.title_cards.layers.text_dialog
+            && let Some(item) = preview
+                .timeline
+                .as_mut()
+                .and_then(|timeline| timeline.text_segments.get_mut(dialog.card))
+                .and_then(|segment| segment.title_card.as_mut())
+                .and_then(|card| card.layers.get_mut(dialog.layer))
+        {
+            dialog.apply_to(item);
+        }
         if self.caption_seek_preview
             && !self.playing
             && let Some(timeline) = preview.timeline.as_mut()
@@ -4357,6 +4367,7 @@ impl EditorWindow {
         if self.voiceover.is_open()
             || self.camera_framing.is_open()
             || self.caption_style_editor
+            || self.sidebar.title_cards.layers.text_dialog.is_some()
             || self.sidebar.caption_translation.review_is_open()
             || self.preset_dialog.is_some()
         {
@@ -4400,7 +4411,9 @@ impl EditorWindow {
     /// (`useEditorShortcuts.ts:10`) and `e.repeat` is ignored there
     /// (`:42`) as `is_held` is here.
     fn on_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cover_crop_key(&event.keystroke.key, window, cx) {
+        if self.cover_crop_key(&event.keystroke.key, window, cx)
+            || self.cover_text_dialog_key(event, window, cx)
+        {
             cx.stop_propagation();
             return;
         }
@@ -14906,6 +14919,7 @@ impl Render for EditorWindow {
             )
             .children(self.render_camera_ratio_dialog(cx))
             .children(self.render_caption_style_editor(window, cx))
+            .children(self.render_cover_text_dialog(window, cx))
             .children(self.render_translation_review(window, cx))
             .children(self.with_style_controls(|this| this.render_sidebar_menu(cx)))
             .children(self.render_toolbar_menu(cx))

@@ -105,6 +105,8 @@ pub struct CoverLayer {
     pub font_size: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stroke_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band_opacity: Option<f32>,
 }
 
 #[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -258,6 +260,7 @@ impl CoverLayer {
             image_crop: None,
             font_size: None,
             stroke_width: None,
+            band_opacity: None,
         }
     }
 
@@ -277,6 +280,9 @@ impl CoverLayer {
             && self
                 .stroke_width
                 .is_none_or(|width| (0.0..=24.0).contains(&width))
+            && self.band_opacity.is_none_or(|opacity| {
+                self.kind.text_style().is_some() && (0.0..=1.0).contains(&opacity)
+            })
             && self.image_crop.is_none_or(|[x, y, width, height]| {
                 matches!(self.kind, CoverLayerKind::Image { .. })
                     && (0.0..=1.0).contains(&x)

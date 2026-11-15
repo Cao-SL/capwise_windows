@@ -2,14 +2,16 @@ use std::{cell::Cell, path::PathBuf, rc::Rc};
 
 use cap_project::CoverLayerKind;
 use gpui::{
-    AnyElement, Bounds, Context, Hsla, InteractiveElement, IntoElement, MouseButton,
+    AnyElement, Bounds, Context, CursorStyle, Hsla, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, StatefulInteractiveElement, Styled,
     StyledImage, Window, div, img, prelude::FluentBuilder, px,
 };
 
 use crate::{
     editor_canvas::CanvasSelection,
-    editor_crop::{self, CropBounds, CropDrag, CropHit, CropState, HANDLES, ResizeSession, Vec2},
+    editor_crop::{
+        self, CropBounds, CropDrag, CropHit, CropState, HANDLES, Handle, ResizeSession, Vec2,
+    },
     editor_window::EditorWindow,
     i18n::tr,
     ui,
@@ -25,6 +27,7 @@ pub(crate) struct CoverCrop {
     source: (u32, u32),
     state: CropState,
     area: Rc<Cell<Option<Bounds<Pixels>>>>,
+    resize_grab_offset: Vec2,
 }
 
 fn source_bounds([x, y, width, height]: [f32; 4], source: (u32, u32)) -> CropBounds {
@@ -49,6 +52,13 @@ fn normalized_bounds(bounds: CropBounds, source: (u32, u32)) -> [f32; 4] {
     ]
 }
 
+fn resize_grab_offset(bounds: CropBounds, handle: Handle, pointer: Vec2) -> Vec2 {
+    Vec2::new(
+        pointer.x - (bounds.x + bounds.width * (1. - handle.origin.x)),
+        pointer.y - (bounds.y + bounds.height * (1. - handle.origin.y)),
+    )
+}
+
 impl CoverCrop {
     fn reset(&mut self) {
         let size = self.state.box_size;
@@ -57,15 +67,22 @@ impl CoverCrop {
     }
 
     fn down(&mut self, event: &MouseDownEvent) {
-        let point = editor_crop::crop_local(self.area.get(), event.position);
+        let Some(area) = self.area.get() else {
+            return;
+        };
+        let point = editor_crop::crop_local(Some(area), event.position);
         let state = &mut self.state;
-        state.drag = Some(match editor_crop::hit_test(point, state.raw) {
-            CropHit::Handle(handle) => CropDrag::Handle(ResizeSession {
-                start_bounds: state.raw,
-                is_alt: event.modifiers.alt,
-                active_handle: handle,
-                original_handle: handle,
-            }),
+        self.resize_grab_offset = Vec2::new(0., 0.);
+        state.drag = Some(match editor_crop::editor_hit_test(point, state.raw) {
+            CropHit::Handle(handle) => {
+                self.resize_grab_offset = resize_grab_offset(state.raw, handle, point);
+                CropDrag::Handle(ResizeSession {
+                    start_bounds: state.raw,
+                    is_alt: event.modifiers.alt,
+                    active_handle: handle,
+                    original_handle: handle,
+                })
+            }
             CropHit::Move => CropDrag::Region {
                 start_offset: Vec2::new(point.x - state.raw.x, point.y - state.raw.y),
                 bounds: state.raw,
@@ -100,8 +117,13 @@ impl CoverCrop {
                     .set_raw(editor_crop::move_bounds(bounds, Some(x), Some(y)));
             }
             Some(CropDrag::Handle(_) | CropDrag::Overlay { .. }) => {
-                self.state
-                    .resize_move(point, event.modifiers.alt, event.modifiers.shift, false);
+                let offset = self.resize_grab_offset;
+                self.state.resize_move(
+                    Vec2::new(point.x - offset.x, point.y - offset.y),
+                    event.modifiers.alt,
+                    event.modifiers.shift,
+                    false,
+                );
             }
             None => {}
         }
@@ -160,6 +182,7 @@ impl EditorWindow {
             source,
             state,
             area: Rc::default(),
+            resize_grab_offset: Vec2::new(0., 0.),
         });
         self.focus_root(window, cx);
         cx.notify();
@@ -218,6 +241,22 @@ impl EditorWindow {
         let bounds = crop.state.raw;
         let (width, height) = crop.state.box_size;
         let area = crop.area.clone();
+        let drag_cursor = crop.state.drag.map(|drag| drag.cursor());
+        let region = div()
+            .absolute()
+            .left(px(bounds.x as f32))
+            .top(px(bounds.y as f32))
+            .w(px(bounds.width as f32))
+            .h(px(bounds.height as f32))
+            .border_1()
+            .border_color(gpui::white())
+            .cursor(drag_cursor.unwrap_or(CursorStyle::OpenHand))
+            .child(editor_crop::editor_thirds_grid(bounds))
+            .children(
+                HANDLES
+                    .iter()
+                    .map(|handle| editor_crop::editor_handle_glyph(*handle, bounds)),
+            );
         let footprint = div()
             .id("cover-crop-image")
             .relative()
@@ -226,27 +265,24 @@ impl EditorWindow {
             .cursor_crosshair()
             .child(
                 img(crop.path.clone())
+                    .absolute()
+                    .inset_0()
                     .size_full()
                     .object_fit(gpui::ObjectFit::Fill),
             )
             .child(
                 gpui::canvas(move |bounds, _, _| area.set(Some(bounds)), |_, _, _, _| {})
                     .absolute()
+                    .inset_0()
                     .size_full(),
             )
             .children(editor_crop::occluders(bounds, width, height))
-            .child(editor_crop::thirds_grid(bounds))
+            .child(region)
             .children(
                 HANDLES
                     .iter()
-                    .copied()
-                    .flat_map(|handle| editor_crop::corner_glyph(handle, bounds, false)),
-            )
-            .children(
-                HANDLES
-                    .iter()
-                    .copied()
-                    .map(|handle| editor_crop::handle_zone(handle, bounds, None)),
+                    .rev()
+                    .map(|handle| editor_crop::editor_handle_zone(*handle, bounds, drag_cursor)),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -366,5 +402,34 @@ mod tests {
         let rect = source_bounds(crop, source);
         assert_eq!(rect, CropBounds::new(200., 100., 400., 400.));
         assert_eq!(normalized_bounds(rect, source), crop);
+    }
+
+    #[test]
+    fn a_moved_crop_resizes_from_the_handle_relative_to_where_it_was_grabbed() {
+        let source = (800, 1600);
+        let initial = CropBounds::new(160., 240., 480., 800.);
+        let size = (320., 640.);
+        let mut state = CropState::new(source, size, initial);
+        state.set_container(size, size);
+        let bounds = state.raw;
+        let pointer = Vec2::new(bounds.x + bounds.width / 2., bounds.y + bounds.height - 5.);
+        let CropHit::Handle(handle) = editor_crop::editor_hit_test(pointer, bounds) else {
+            panic!("the bottom handle must be reachable from inside the crop");
+        };
+        assert_eq!(handle.direction, editor_crop::Direction::S);
+        let offset = resize_grab_offset(bounds, handle, pointer);
+        state.drag = Some(CropDrag::Handle(ResizeSession {
+            start_bounds: bounds,
+            is_alt: false,
+            active_handle: handle,
+            original_handle: handle,
+        }));
+        state.resize_move(
+            Vec2::new(pointer.x - offset.x, pointer.y - offset.y - 48.),
+            false,
+            false,
+            false,
+        );
+        assert_eq!(state.real(), CropBounds::new(160., 240., 480., 680.));
     }
 }

@@ -3742,11 +3742,15 @@ project_changed = "The project changed while preparing the export. Start export 
 [editor.cover_controls]
 lock = "Lock"
 unlock = "Unlock"
-custom = "Custom"
+custom = "Custom text style"
 font_size = "Font size"
 text_color = "Text color"
 stroke_width = "Stroke width"
 stroke_color = "Stroke color"
+font = "Font"
+background = "Text background"
+background_color = "Background color"
+opacity = "Background opacity"
 apply = "Apply"
 
 [editor.title_cards]

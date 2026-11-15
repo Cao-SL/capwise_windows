@@ -3357,11 +3357,15 @@ memory_stop = "La exportación se ha detenido porque la presión de memoria sigu
 [editor.cover_controls]
 lock = "Bloquear"
 unlock = "Desbloquear"
-custom = "Personalizar"
+custom = "Estilo de texto personalizado"
 font_size = "Tamaño del texto"
 text_color = "Color del texto"
 stroke_width = "Grosor del contorno"
 stroke_color = "Color del contorno"
+font = "Fuente"
+background = "Fondo del texto"
+background_color = "Color de fondo"
+opacity = "Opacidad del fondo"
 apply = "Aplicar"
 
 [editor.title_cards]

@@ -3740,11 +3740,15 @@ project_changed = "准备导出时项目发生了变化，请重新导出以使�
 [editor.cover_controls]
 lock = "锁定"
 unlock = "解锁"
-custom = "自定义"
+custom = "自定义文字样式"
 font_size = "字号"
 text_color = "文字颜色"
 stroke_width = "描边宽度"
 stroke_color = "描边颜色"
+font = "字体"
+background = "文字背景"
+background_color = "背景颜色"
+opacity = "背景不透明度"
 apply = "应用"
 
 [editor.title_cards]

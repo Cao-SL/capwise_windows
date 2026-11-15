@@ -3357,11 +3357,15 @@ memory_stop = "Der Export wurde wegen anhaltend kritischen Speicherdrucks gestop
 [editor.cover_controls]
 lock = "Sperren"
 unlock = "Entsperren"
-custom = "Anpassen"
+custom = "Eigener Textstil"
 font_size = "Schriftgröße"
 text_color = "Textfarbe"
 stroke_width = "Konturstärke"
 stroke_color = "Konturfarbe"
+font = "Schrift"
+background = "Texthintergrund"
+background_color = "Hintergrundfarbe"
+opacity = "Deckkraft des Hintergrunds"
 apply = "Anwenden"
 
 [editor.title_cards]

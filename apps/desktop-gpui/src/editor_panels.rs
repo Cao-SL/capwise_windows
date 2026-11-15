@@ -2823,6 +2823,7 @@ pub enum FieldKey {
     CoverLayerText(usize, usize),
     CoverTextSize(usize, usize),
     CoverStrokeWidth(usize, usize),
+    CoverBackgroundOpacity(usize, usize),
     CaptionText(usize),
     /// Single-line names and labels.
     AudioName(usize),
@@ -3037,13 +3038,18 @@ impl EditorWindow {
             FieldKey::CoverLayerText(index, layer) => {
                 out.push_str(self.cover_layer_text(index, layer)?);
             }
-            FieldKey::CoverTextSize(index, layer) | FieldKey::CoverStrokeWidth(index, layer) => {
-                let item = self.cover_layer(index, layer)?;
-                let value = if matches!(key, FieldKey::CoverTextSize(..)) {
-                    item.font_size
-                } else {
-                    item.stroke_width
-                        .or_else(|| item.kind.text_style()?.stroke.is_none().then_some(0.0))
+            FieldKey::CoverTextSize(index, layer)
+            | FieldKey::CoverStrokeWidth(index, layer)
+            | FieldKey::CoverBackgroundOpacity(index, layer) => {
+                let item = self.cover_appearance(index, layer)?;
+                let value = match key {
+                    FieldKey::CoverTextSize(..) => item.font_size,
+                    FieldKey::CoverBackgroundOpacity(..) => {
+                        Some((item.band_opacity.unwrap_or(1.0) * 100.0).round())
+                    }
+                    _ => item
+                        .stroke_width
+                        .or_else(|| item.kind.text_style()?.stroke.is_none().then_some(0.0)),
                 };
                 if let Some(value) = value {
                     let _ = write!(out, "{value}");
@@ -3143,7 +3149,13 @@ impl EditorWindow {
     fn begin_field_edit(&mut self, key: FieldKey) {
         // The crop boxes never write the project, and a bracket held open by a
         // focused box would swallow Save's single history entry.
-        if matches!(key, FieldKey::Crop(_)) {
+        if matches!(
+            key,
+            FieldKey::Crop(_)
+                | FieldKey::CoverTextSize(..)
+                | FieldKey::CoverStrokeWidth(..)
+                | FieldKey::CoverBackgroundOpacity(..)
+        ) {
             return;
         }
         if self.field_editing == Some(key) {
@@ -3273,10 +3285,9 @@ impl EditorWindow {
             FieldKey::CoverLayerText(index, layer) => {
                 self.commit_cover_layer_text(index, layer, text, window, cx);
             }
-            FieldKey::CoverTextSize(index, layer) | FieldKey::CoverStrokeWidth(index, layer) => {
-                if !final_commit {
-                    return;
-                }
+            FieldKey::CoverTextSize(index, layer)
+            | FieldKey::CoverStrokeWidth(index, layer)
+            | FieldKey::CoverBackgroundOpacity(index, layer) => {
                 let value = match text.trim() {
                     "" => None,
                     text => {
@@ -3287,21 +3298,17 @@ impl EditorWindow {
                         Some(value as f32)
                     }
                 };
-                self.edit_cover_layer(index, layer, window, cx, move |layers, layer| {
-                    let item = &mut layers[layer];
-                    if item.kind.text_style().is_none() {
-                        return;
+                self.edit_cover_appearance(index, layer, cx, move |item, style| match key {
+                    FieldKey::CoverTextSize(..) => {
+                        item.font_size = value.map(|v| v.clamp(8., 400.))
                     }
-                    if matches!(key, FieldKey::CoverTextSize(..)) {
-                        item.font_size = value.map(|v| v.clamp(8., 400.));
-                    } else {
+                    FieldKey::CoverBackgroundOpacity(..) => {
+                        item.band_opacity = value.map(|v| v.clamp(0., 100.) / 100.)
+                    }
+                    _ => {
                         item.stroke_width = value.map(|v| v.clamp(0., 24.));
-                        if item.stroke_width.is_some_and(|v| v > 0.)
-                            && let Some(mut style) = item.kind.text_style()
-                            && style.stroke.is_none()
-                        {
+                        if item.stroke_width.is_some_and(|v| v > 0.) && style.stroke.is_none() {
                             style.stroke = Some("#111111".into());
-                            item.kind.set_text_style(style);
                         }
                     }
                 });
@@ -4097,7 +4104,7 @@ impl EditorWindow {
         match kind {
             SidebarMenu::CoverFontFamily(index, layer) => {
                 let current = self
-                    .cover_layer(index, layer)
+                    .cover_appearance(index, layer)
                     .and_then(|item| item.kind.text_style())
                     .and_then(|style| style.font)
                     .unwrap_or_else(|| "Noto Sans SC".into());
@@ -4156,12 +4163,8 @@ impl EditorWindow {
                 let Some((family, _)) = font_picker_options().into_iter().nth(index) else {
                     return;
                 };
-                self.edit_cover_layer(card, layer, window, cx, move |layers, layer| {
-                    let item = &mut layers[layer];
-                    if let Some(mut style) = item.kind.text_style() {
-                        style.font = Some(family);
-                        item.kind.set_text_style(style);
-                    }
+                self.edit_cover_appearance(card, layer, cx, move |_, style| {
+                    style.font = Some(family);
                 });
             }
             SidebarMenu::TextFontFamily(_) => {
@@ -8557,14 +8560,19 @@ impl EditorWindow {
             && let Some(item) = self.cover_layer(index, layer)
             && item.kind.text_style().is_some()
         {
+            fields.push(FieldKey::CoverLayerText(index, layer));
+        }
+        if let Some(dialog) = &self.sidebar.title_cards.layers.text_dialog {
+            let (index, layer) = (dialog.card, dialog.layer);
             fields.extend([
-                FieldKey::CoverLayerText(index, layer),
                 FieldKey::CoverTextSize(index, layer),
                 FieldKey::CoverStrokeWidth(index, layer),
+                FieldKey::CoverBackgroundOpacity(index, layer),
             ]);
             colors.extend([
                 ColorTarget::CoverText(index, layer),
                 ColorTarget::CoverStroke(index, layer),
+                ColorTarget::CoverBackground(index, layer),
             ]);
         }
 
