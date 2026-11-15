@@ -248,7 +248,7 @@ impl ZoomFocus {
         }
 
         let keep_visible = |center: f64, min: f64, max: f64| {
-            let margin = viewport * 0.1;
+            let margin = viewport * 0.06;
             let first = (max - viewport + margin).clamp(0.0, travel);
             let last = (min - margin).clamp(first, travel);
             (center * travel).clamp(first, last) / travel
@@ -1248,9 +1248,22 @@ impl ZoomTransformTimeline {
         }
     }
 
-    /// Whether any precomputed step in `[from_secs, to_secs]` was an instant
-    /// snap (no spring). Motion-effect consumers can use this to suppress
-    /// velocity-derived effects across intentional discontinuities.
+    pub(crate) fn automatic_at(&self, time: f64) -> bool {
+        let previous = || {
+            let just_ended = self
+                .segment_index
+                .max_ends
+                .partition_point(|&end| end < time);
+            let &index = self.segment_index.ordered.get(just_ended.checked_sub(1)?)?;
+            (time - self.zoom_segments[index].end < 0.65).then_some(index)
+        };
+        self.segment_index
+            .active_at(time)
+            .or_else(previous)
+            .is_some_and(|index| matches!(self.zoom_segments[index].mode, ZoomMode::Auto))
+    }
+
+    /// Whether any precomputed step in the range was an instant snap.
     pub fn snapped_within(&self, from_secs: f32, to_secs: f32) -> bool {
         if self.samples.is_empty() {
             return false;

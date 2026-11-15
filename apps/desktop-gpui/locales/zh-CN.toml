@@ -3560,8 +3560,8 @@ delete = "删除当前预设"
 copy_name = "{name} · 副本 {number}"
 
 [editor.review]
-action = "AI 字幕校对"
-running = "正在校对字幕…"
+action = "AI 字幕优化"
+running = "正在优化字幕…"
 cancel = "取消"
 hidden = "仅字幕隐藏"
 invalid = "校对结果未通过校验，原字幕已保留，请重试。"
@@ -3586,7 +3586,7 @@ clean = "AI 没发现需要修改的地方"
 settled = "AI 的修改都已处理"
 
 [settings.review]
-title = "AI 字幕校对"
+title = "AI 字幕优化"
 enabled = "生成字幕后自动校对"
 description = "使用默认大模型纠正明显识别错误、隐藏无意义口头禅。只发送字幕文字，不剪切音频；已有项目需手动发起校对。"
 edit_rules = "编辑校对提示词"

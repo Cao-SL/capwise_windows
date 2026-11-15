@@ -88,6 +88,8 @@ struct Reply {
 struct Evidence {
     original: Vec<CaptionSegment>,
     changes: Vec<Change>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    applied_changes: Option<Vec<Change>>,
     provider: String,
     model: String,
     prompt: String,
@@ -819,7 +821,7 @@ fn latest_review(project: &Path) -> Option<Vec<Change>> {
         .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
         .max_by_key(|(modified, _)| *modified)?;
     let evidence: Evidence = serde_json::from_slice(&std::fs::read(newest.1).ok()?).ok()?;
-    Some(evidence.changes)
+    Some(evidence.applied_changes.unwrap_or(evidence.changes))
 }
 
 /// A review change still visible in the captions: the word keeps the text and
@@ -1099,6 +1101,79 @@ where
                 .map_err(|_| tr::editor::review::invalid().to_string())
         }
     }
+}
+
+struct ReviewedLines {
+    segments: Vec<CaptionSegment>,
+    changes: Vec<Change>,
+}
+
+async fn reflow_reviewed_lines(
+    provider: &llm::ContentModel,
+    source: &[CaptionSegment],
+    changes: &[Change],
+) -> Option<ReviewedLines> {
+    use cap_project::caption_breaks::{bind_opening_punctuation, reads_as_chinese};
+    let mut offsets = HashMap::new();
+    let mut words = Vec::new();
+    for segment in source {
+        if offsets
+            .insert(segment.id.as_str(), (words.len(), segment.words.len()))
+            .is_some()
+        {
+            return None;
+        }
+        words.extend(segment.words.iter().cloned());
+    }
+    if !reads_as_chinese(&words) {
+        return None;
+    }
+    let position = |change: &Change| {
+        let &(offset, count) = offsets.get(change.segment_id.as_str())?;
+        (change.word_index < count).then_some(offset + change.word_index)
+    };
+    for change in changes {
+        let word = words.get_mut(position(change)?)?;
+        if word.text != change.before || word.hidden {
+            return None;
+        }
+        word.text.clone_from(&change.after);
+        word.hidden = change.hide;
+    }
+    bind_opening_punctuation(&mut words);
+    let (preferred, _, _) = crate::caption_breaks::model_preferences(provider, &words).await;
+    let segments = crate::caption_breaks::planned_segments(&words, preferred);
+    if segments
+        .iter()
+        .map(|segment| segment.words.len())
+        .sum::<usize>()
+        != words.len()
+    {
+        return None;
+    }
+    let locations: Vec<_> = segments
+        .iter()
+        .flat_map(|segment| {
+            segment
+                .words
+                .iter()
+                .enumerate()
+                .map(|(index, word)| (segment.id.as_str(), index, word))
+        })
+        .collect();
+    let changes = changes
+        .iter()
+        .filter_map(|original| {
+            let &(segment_id, word_index, word) = locations.get(position(original)?)?;
+            let mut change = original.clone();
+            change.segment_id = segment_id.to_owned();
+            change.word_index = word_index;
+            change.after.clone_from(&word.text);
+            change.hide = word.hidden;
+            Some(change)
+        })
+        .collect();
+    Some(ReviewedLines { segments, changes })
 }
 
 fn apply_changes(
@@ -1785,7 +1860,7 @@ impl EditorWindow {
             true,
             cx,
         );
-        self.seek_to_time(time, cx);
+        self.seek_to_caption_time(time, cx);
         self.focus_root(window, cx);
         cx.notify();
     }
@@ -1967,6 +2042,21 @@ impl EditorWindow {
         else {
             return;
         };
+        let reflow = captions.settings.translations.is_empty()
+            && captions
+                .segments
+                .iter()
+                .all(|segment| !segment.words.is_empty())
+            && self.project.timeline.as_ref().is_none_or(|timeline| {
+                timeline.caption_segments.iter().all(|segment| {
+                    segment.fade_duration_override.is_none()
+                        && segment.linger_duration_override.is_none()
+                        && segment.position_override.is_none()
+                        && segment.color_override.is_none()
+                        && segment.background_color_override.is_none()
+                        && segment.font_size_override.is_none()
+                })
+            });
         let original = captions.segments.clone();
         let initial_content = caption_content_snapshot(&self.project);
         if original.iter().all(|segment| segment.words.is_empty()) {
@@ -2047,11 +2137,21 @@ impl EditorWindow {
                             provider.chat_json(session, prompt, &message).await
                         }).await?);
                     }
-                    let evidence = Evidence { original: task_original, changes: changes.clone(), provider: provider_id, model, prompt };
+                    let lines = if reflow {
+                        reflow_reviewed_lines(&provider, &task_original, &changes).await
+                    } else {
+                        None
+                    };
+                    let evidence = Evidence {
+                        original: task_original,
+                        changes: changes.clone(),
+                        applied_changes: lines.as_ref().map(|lines| lines.changes.clone()),
+                        provider: provider_id, model, prompt,
+                    };
                     let directory = task_path.join("caption-reviews");
                     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
                     write_json(&directory.join(format!("review-{}.json", uuid::Uuid::new_v4())), &evidence)?;
-                    Ok::<_, String>(changes)
+                    Ok::<_, String>((changes, lines))
                 };
                 tokio::select! { biased; _ = &mut receiver => None, result = work => Some(result) }
             });
@@ -2062,9 +2162,21 @@ impl EditorWindow {
                 this.sidebar.caption_review.cancel = None;
                 let unchanged = this.project_path == path && caption_content_snapshot(&this.project) == initial_content;
                 let outcome = match result {
-                    Ok(changes) if unchanged => (|| {
+                    Ok((changes, lines)) if unchanged => (|| {
                         let mut next = this.project.clone();
-                        apply_changes(&mut next, &original, &changes, &durations);
+                        let changes = match lines {
+                            Some(lines) => {
+                                if let Some(captions) = next.captions.as_mut() {
+                                    captions.segments = lines.segments;
+                                    cap_project::synchronize_captions(&mut next, &durations);
+                                }
+                                lines.changes
+                            }
+                            None => {
+                                apply_changes(&mut next, &original, &changes, &durations);
+                                changes
+                            }
+                        };
                         let mut request = processing(&path).map_err(|error| error.to_string())?.ok_or_else(|| tr::editor::review::interrupted().to_string())?;
                         request.wait_for_save(&next, ProcessingStatus::Reviewed);
                         save_processing(&path, &request)?;

@@ -326,7 +326,7 @@ impl EditorWindow {
         if self.caption_index_at(playhead) != Some(index)
             || playhead < self.caption_visible_from(&segment)
         {
-            self.seek_to_time(caption_anchor(&segment), cx);
+            self.seek_to_caption_time(caption_anchor(&segment), cx);
         }
         self.set_selection_with_scroll(
             Some(Selection::single(TrackKind::Caption, index)),
@@ -738,7 +738,7 @@ impl EditorWindow {
             true,
             cx,
         );
-        self.seek_to_time(caption_anchor(&segment), cx);
+        self.seek_to_caption_time(caption_anchor(&segment), cx);
         self.reveal_timeline_range(segment.start, segment.end, cx);
         let handle = input.read(cx).focus_handle();
         window.focus(&handle, cx);

@@ -3614,7 +3614,7 @@ test_passed = "Verbunden · {ms} ms"
 testing = "Wird getestet…"
 
 [settings.review]
-title = "KI-Untertitelprüfung"
+title = "KI-Untertiteloptimierung"
 enabled = "Nach dem Erzeugen von Untertiteln prüfen"
 description = "Das Standard-Sprachmodell korrigiert eindeutige Erkennungsfehler und blendet bedeutungslose Füllwörter aus. Nur Untertiteltext wird gesendet; Audio bleibt unverändert. Bestehende Projekte werden nur auf Anforderung geprüft."
 edit_rules = "Prüfanweisungen bearbeiten"
@@ -3679,8 +3679,8 @@ not_started = "Die Untertitelverarbeitung wurde nicht gestartet. Prüfe ihre Ein
 project_changed = "Das Projekt wurde während der Exportvorbereitung geändert. Starte den Export erneut, um die neueste Version zu verwenden."
 
 [editor.review]
-action = "KI-Untertitelprüfung"
-running = "Untertitel werden geprüft…"
+action = "KI-Untertiteloptimierung"
+running = "Untertitel werden optimiert…"
 cancel = "Abbrechen"
 hidden = "Aus Untertiteln ausgeblendet"
 invalid = "Die Prüfantwort hat die Validierung nicht bestanden. Die ursprünglichen Untertitel wurden behalten; versuche es erneut."

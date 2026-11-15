@@ -1672,6 +1672,7 @@ pub struct EditorWindow {
     /// `editorState.canvasSelection`.
     pub(crate) canvas_selection: Option<crate::editor_canvas::CanvasSelection>,
     pub(crate) canvas_text_edit: Option<crate::editor_canvas::CanvasTextEdit>,
+    caption_seek_preview: bool,
     pub(crate) caption_edit: Option<crate::caption_canvas::CaptionCanvasEdit>,
     /// The caption edit a press on the preview caption opened, still open to
     /// become a drag instead.
@@ -2406,6 +2407,7 @@ impl EditorWindow {
             player_frame_rect,
             canvas_selection: None,
             canvas_text_edit: None,
+            caption_seek_preview: false,
             caption_edit: None,
             caption_press: false,
             hovered_canvas: None,
@@ -3186,6 +3188,12 @@ impl EditorWindow {
             return;
         };
         let mut preview = self.project.clone();
+        if self.caption_seek_preview
+            && !self.playing
+            && let Some(timeline) = preview.timeline.as_mut()
+        {
+            timeline.zoom_segments.clear();
+        }
         preview.editing_caption = self.caption_edit_hides_caption();
         if let Some(edit) = &self.canvas_text_edit
             && let Some(layer) = edit.layer
@@ -3892,6 +3900,10 @@ impl EditorWindow {
             return;
         }
         self.library_audition = None;
+        if self.caption_seek_preview {
+            self.caption_seek_preview = false;
+            self.publish_project();
+        }
         let Some(transport) = &self.transport else {
             return;
         };
@@ -4033,11 +4045,24 @@ impl EditorWindow {
     /// (`PlaybackHandle::seek`), so a scrub during playback holds the last
     /// picture for one decode instead of paying a warmup per tick.
     pub fn seek_to_time(&mut self, time: f64, cx: &mut Context<Self>) {
+        self.seek_with_preview_mode(time, false, cx);
+    }
+
+    pub(crate) fn seek_to_caption_time(&mut self, time: f64, cx: &mut Context<Self>) {
+        self.seek_with_preview_mode(time, !self.playing, cx);
+    }
+
+    fn seek_with_preview_mode(&mut self, time: f64, caption_preview: bool, cx: &mut Context<Self>) {
         if self.voiceover.is_busy() {
             return;
         }
         self.stop_canvas_text_edit(cx);
+        let mode_changed = self.caption_seek_preview != caption_preview;
+        self.caption_seek_preview = caption_preview;
         if self.apply_seek(time) {
+            if mode_changed {
+                self.publish_project();
+            }
             self.transcript_sync_active(true, cx);
             cx.notify();
         }
@@ -5315,6 +5340,14 @@ impl EditorWindow {
         cx: &mut Context<Self>,
     ) {
         if self.selection != selection {
+            if self.caption_seek_preview
+                && selection
+                    .as_ref()
+                    .is_none_or(|selection| selection.track != TrackKind::Caption)
+            {
+                self.caption_seek_preview = false;
+                self.publish_project();
+            }
             if selection.is_some() {
                 self.sidebar.title_cards.empty_role = None;
             }

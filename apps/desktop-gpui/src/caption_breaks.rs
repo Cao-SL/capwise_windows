@@ -3,8 +3,8 @@
 //! the configured language model would break.
 
 use cap_project::caption_breaks::{
-    BreakHints, model_breaks, model_input, model_windows, plan_caption_lines, reads_as_chinese,
-    segments_from_lines,
+    BreakHints, bind_opening_punctuation, model_breaks, model_input, model_windows,
+    plan_caption_lines, reads_as_chinese, segments_from_lines,
 };
 use cap_project::{CaptionSegment, CaptionWord};
 
@@ -105,13 +105,15 @@ pub fn local_segments(words: &[CaptionWord], id_prefix: &str) -> Option<Vec<Capt
     if !reads_as_chinese(words) {
         return None;
     }
+    let mut words = words.to_vec();
+    bind_opening_punctuation(&mut words);
     let hints = BreakHints {
-        inside_word: inside_word(words),
+        inside_word: inside_word(&words),
         preferred: Vec::new(),
     };
     Some(segments_from_lines(
-        words,
-        &plan_caption_lines(words, &hints),
+        &words,
+        &plan_caption_lines(&words, &hints),
         id_prefix,
     ))
 }
@@ -252,10 +254,11 @@ impl crate::editor_window::EditorWindow {
         let Some(captions) = self.project.captions.as_ref() else {
             return;
         };
-        let words = source_words(&captions.segments);
+        let mut words = source_words(&captions.segments);
         if !reads_as_chinese(&words) {
             return;
         }
+        bind_opening_punctuation(&mut words);
         let provider = crate::llm::default_content_model();
         if automatic && provider.is_none() {
             return;
