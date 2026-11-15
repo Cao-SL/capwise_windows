@@ -251,6 +251,27 @@ fn valid_pose(pose: &LayerPose) -> bool {
 }
 
 impl CoverLayer {
+    pub fn display_pose(&self, source: (u32, u32), output: (u32, u32)) -> LayerPose {
+        let mut pose = self.pose;
+        if matches!(
+            self.kind,
+            CoverLayerKind::Image {
+                persona: Some(_),
+                ..
+            }
+        ) && source.0 > 0
+            && source.1 > 0
+            && output.0 > 0
+            && output.1 > 0
+        {
+            let [_, _, width, height] = self.image_crop.unwrap_or([0., 0., 1., 1.]);
+            let source_aspect =
+                f64::from(source.0) * f64::from(width) / (f64::from(source.1) * f64::from(height));
+            pose.size.x = pose.size.y * source_aspect * f64::from(output.1) / f64::from(output.0);
+        }
+        pose
+    }
+
     pub fn new(pose: LayerPose, kind: CoverLayerKind) -> Self {
         Self {
             id: uuid::Uuid::new_v4().simple().to_string(),

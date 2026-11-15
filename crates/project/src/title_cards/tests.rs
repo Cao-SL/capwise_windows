@@ -600,6 +600,42 @@ fn cover_image_crop_and_lock_round_trip_with_custom_text_sizing() {
 }
 
 #[test]
+fn cropped_persona_uses_the_visible_source_aspect_after_changing_expression() {
+    let mut layer = CoverLayer::new(
+        LayerPose {
+            center: XY::new(0.2056, 0.707),
+            size: XY::new(0.2625, 0.4947),
+            rotation: 0.,
+            opacity: 1.,
+        },
+        CoverLayerKind::Image {
+            path: "content/images/portrait.png".into(),
+            mirror: false,
+            persona: Some(CoverPersonaRef {
+                persona: "hanfu".into(),
+                file: "blazer-surprise.webp".into(),
+            }),
+        },
+    );
+    let crop = [0.068_777_29, 0.008_035_715, 0.885_371_2, 0.7];
+    layer.image_crop = Some(crop);
+    let source = (916, 1120);
+    let visible_aspect = 916. * f64::from(crop[2]) / (1120. * f64::from(crop[3]));
+    for output in [(1218, 790), (1920, 1080), (1080, 1920)] {
+        let corrected = layer.display_pose(source, output);
+        let drawn_aspect =
+            corrected.size.x * f64::from(output.0) / (corrected.size.y * f64::from(output.1));
+        assert!((drawn_aspect - visible_aspect).abs() < 1e-9);
+        assert_eq!(corrected.center, layer.pose.center);
+        assert_eq!(corrected.size.y, layer.pose.size.y);
+    }
+    if let CoverLayerKind::Image { persona, .. } = &mut layer.kind {
+        *persona = None;
+    }
+    assert_eq!(layer.display_pose(source, (1218, 790)), layer.pose);
+}
+
+#[test]
 fn a_card_has_at_most_one_title_layer_and_v1_layers_still_read() {
     let segment = card(TitleCardRole::Intro, 2.0);
     let pose = json!({"center": {"x": 0.5, "y": 0.5}, "size": {"x": 0.5, "y": 0.2}});

@@ -212,6 +212,7 @@ impl EditorWindow {
             return;
         };
         if apply {
+            let output = self.cover_output();
             let bounds = normalized_bounds(crop.state.real(), crop.source);
             let next = (bounds != FULL_IMAGE).then_some(bounds);
             self.edit_cover_layer(crop.card, crop.layer, window, cx, move |layers, index| {
@@ -223,6 +224,7 @@ impl EditorWindow {
                 item.pose.size.x *= f64::from(bounds[2] / previous[2]);
                 item.pose.size.y *= f64::from(bounds[3] / previous[3]);
                 item.image_crop = next;
+                item.pose = item.display_pose(crop.source, output);
             });
         }
         self.focus_root(window, cx);
