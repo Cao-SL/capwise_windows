@@ -200,7 +200,7 @@ impl ClusterCenters {
         }
     }
 
-    fn center_at(&self, time_ms: f64) -> Option<(f64, f64)> {
+    fn at(&self, time_ms: f64) -> Option<&ClickCluster> {
         if self.time_ordered {
             let through_time = self
                 .clusters
@@ -213,13 +213,57 @@ impl ClusterCenters {
                 .find(|cluster| cluster.start_time_ms <= time_ms)
                 .or_else(|| self.clusters.first())
         }
-        .map(ClickCluster::center)
+    }
+
+    fn center_at(&self, time_ms: f64) -> Option<(f64, f64)> {
+        self.at(time_ms).map(ClickCluster::center)
+    }
+}
+
+struct ZoomFocus {
+    clicks: ClusterCenters,
+    movement: ClusterCenters,
+    amount: f64,
+    edge_snap_ratio: f64,
+}
+
+impl ZoomFocus {
+    fn center_at(&self, recording_ms: f64) -> Option<(f64, f64)> {
+        let movement = self.movement.at(recording_ms);
+        let focus = self
+            .clicks
+            .center_at(recording_ms)
+            .or_else(|| movement.map(ClickCluster::center))?;
+        let anchor = SegmentBounds::calculate_follow_center(focus, self.edge_snap_ratio);
+        let Some(movement) = movement.filter(|movement| {
+            let (x, y) = movement.center();
+            (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)
+        }) else {
+            return Some(anchor);
+        };
+        let viewport = self.amount.recip();
+        let travel = 1.0 - viewport;
+        if travel <= 0.0 {
+            return Some(anchor);
+        }
+
+        let keep_visible = |center: f64, min: f64, max: f64| {
+            let margin = viewport * 0.06;
+            let first = (max - viewport + margin).clamp(0.0, travel);
+            let last = (min - margin).clamp(first, travel);
+            (center * travel).clamp(first, last) / travel
+        };
+
+        Some((
+            keep_visible(anchor.0, movement.min_x, movement.max_x),
+            keep_visible(anchor.1, movement.min_y, movement.max_y),
+        ))
     }
 }
 
 struct CroppedClusters {
     crop: Option<CursorCropMap>,
-    clusters: ClusterCenters,
+    clusters: ZoomFocus,
 }
 
 struct TimedClusterVariant {
@@ -229,7 +273,7 @@ struct TimedClusterVariant {
 }
 
 enum ZoomClusters {
-    Static(ClusterCenters),
+    Static(ZoomFocus),
     Styled {
         variants: Vec<CroppedClusters>,
         styles: Vec<TimedClusterVariant>,
@@ -269,17 +313,24 @@ impl ZoomClusters {
                     clusters.push(ClickCluster::new(x, y, time));
                 }
             }
-            if clusters.is_empty() {
-                clusters = build_clusters(
-                    cursor_events,
-                    moves_time_ordered,
-                    recording_start,
-                    recording_end,
-                    segment.amount,
-                    crop,
-                );
+            let movement = build_clusters(
+                cursor_events,
+                moves_time_ordered,
+                recording_start,
+                recording_end,
+                segment.amount,
+                crop,
+            );
+            ZoomFocus {
+                clicks: ClusterCenters::new(clusters),
+                movement: ClusterCenters::new(movement),
+                amount: if segment.amount.is_finite() {
+                    segment.amount.max(1.0)
+                } else {
+                    1.0
+                },
+                edge_snap_ratio: segment.edge_snap_ratio,
             }
-            ClusterCenters::new(clusters)
         };
         let base = build(crops.base);
         let overlaps =
@@ -1197,9 +1248,22 @@ impl ZoomTransformTimeline {
         }
     }
 
-    /// Whether any precomputed step in `[from_secs, to_secs]` was an instant
-    /// snap (no spring). Motion-effect consumers can use this to suppress
-    /// velocity-derived effects across intentional discontinuities.
+    pub(crate) fn automatic_at(&self, time: f64) -> bool {
+        let previous = || {
+            let just_ended = self
+                .segment_index
+                .max_ends
+                .partition_point(|&end| end < time);
+            let &index = self.segment_index.ordered.get(just_ended.checked_sub(1)?)?;
+            (time - self.zoom_segments[index].end < 0.65).then_some(index)
+        };
+        self.segment_index
+            .active_at(time)
+            .or_else(previous)
+            .is_some_and(|index| matches!(self.zoom_segments[index].mode, ZoomMode::Auto))
+    }
+
+    /// Whether any precomputed step in the range was an instant snap.
     pub fn snapped_within(&self, from_secs: f32, to_secs: f32) -> bool {
         if self.samples.is_empty() {
             return false;
@@ -1309,14 +1373,15 @@ impl ZoomTransformTimeline {
                             self.recording_clip,
                             self.prefer_outgoing,
                         ) * 1000.0;
-                        let focus = self.clusters[index]
+                        self.clusters[index]
                             .as_ref()
                             .and_then(|clusters| clusters.center_at(timeline_secs, recording_ms))
-                            .unwrap_or(FALLBACK_FOCUS);
-                        SegmentBounds::calculate_follow_center(
-                            (focus.0.clamp(0.0, 1.0), focus.1.clamp(0.0, 1.0)),
-                            segment.edge_snap_ratio,
-                        )
+                            .unwrap_or_else(|| {
+                                SegmentBounds::calculate_follow_center(
+                                    FALLBACK_FOCUS,
+                                    segment.edge_snap_ratio,
+                                )
+                            })
                     }
                 };
 
@@ -2376,6 +2441,29 @@ mod tests {
     }
 
     #[test]
+    fn auto_zoom_follows_motion_after_the_first_click() {
+        let cursor = CursorEvents {
+            moves: vec![
+                move_event(500.0, 0.1, 0.3),
+                move_event(1000.0, 0.1, 0.3),
+                move_event(3000.0, 0.8, 0.7),
+                move_event(3300.0, 0.9, 0.7),
+                move_event(4000.0, 0.89, 0.71),
+            ],
+            clicks: vec![click_event(1000.0)],
+        };
+        let segments = [auto_segment(0.5, 7.0, 2.5)];
+        let mut timeline = timeline_for(&segments, &cursor, 8.0);
+        timeline.precompute();
+
+        for (time, x, y) in [(2.0, 0.1, 0.3), (4.5, 0.89, 0.71), (6.5, 0.89, 0.71)] {
+            let (left, top, size) = visible_viewport(&timeline.sample(time));
+            assert!((left..=left + size).contains(&x), "x at {time}: {left}");
+            assert!((top..=top + size).contains(&y), "y at {time}: {top}");
+        }
+    }
+
+    #[test]
     fn auto_zoom_keeps_idle_cursor_visible_until_movement_resumes() {
         for (recording_start, timescale) in [(0.0, 1.0), (10.0, 2.0)] {
             let segment = auto_segment(2.0, 10.0, 2.0);
@@ -2419,7 +2507,7 @@ mod tests {
     }
 
     #[test]
-    fn hovering_into_a_corner_keeps_the_last_click_framed() {
+    fn hovering_into_a_corner_pans_only_after_leaving_the_click_framing() {
         let corner = (0.95, 0.9);
         let mut moves = Vec::new();
         for i in 0..50 {
@@ -2447,10 +2535,11 @@ mod tests {
         let settled = timeline.sample(8.0);
         let (left, top, size) = visible_viewport(&settled);
         let (early_left, early_top, _) = visible_viewport(&timeline.sample(4.0));
-        assert!((left - early_left).abs() < 0.001);
-        assert!((top - early_top).abs() < 0.001);
-        assert!((left..=left + size).contains(&0.5));
-        assert!(corner.0 > left + size);
+        let (still_left, still_top, _) = visible_viewport(&timeline.sample(4.8));
+        assert!((still_left - early_left).abs() < 0.001);
+        assert!((still_top - early_top).abs() < 0.001);
+        assert!((left..=left + size).contains(&corner.0));
+        assert!((top..=top + size).contains(&corner.1));
         assert_viewport_in_bounds(&settled, "corner hover");
     }
 

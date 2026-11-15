@@ -10,6 +10,8 @@ const SHORT_LINE_WIDTH: f32 = 4.0;
 const MAX_LINE_SECONDS: f32 = 7.0;
 /// Silence long enough that a caption spanning it would sit over nothing.
 const FORCED_GAP: f32 = 1.0;
+const OPEN_MARKS: [char; 10] = ['《', '〈', '“', '‘', '「', '『', '【', '（', '(', '['];
+const CLOSE_MARKS: [char; 10] = ['》', '〉', '”', '’', '」', '』', '】', '）', ')', ']'];
 
 const CONJUNCTIONS: [&str; 16] = [
     "但是", "所以", "如果", "然后", "因为", "而且", "还有", "不过", "那么", "可是", "或者", "并且",
@@ -86,6 +88,53 @@ fn starts_with_conjunction(words: &[CaptionWord], index: usize) -> bool {
         .any(|conjunction| text.starts_with(conjunction))
 }
 
+pub fn bind_opening_punctuation(words: &mut [CaptionWord]) {
+    for index in 0..words.len().saturating_sub(1) {
+        let text = words[index].text.trim_end();
+        let stem = text.trim_end_matches(OPEN_MARKS);
+        if stem.is_empty()
+            || stem.len() == text.len()
+            || words[index].hidden
+            || words[index + 1].hidden
+        {
+            continue;
+        }
+        let suffix = text[stem.len()..].to_owned();
+        words[index].text = stem.to_owned();
+        words[index + 1].text.insert_str(0, &suffix);
+    }
+}
+
+fn orphaned_punctuation(words: &[CaptionWord], index: usize) -> bool {
+    words[..=index]
+        .iter()
+        .rev()
+        .find(|word| !word.hidden)
+        .is_some_and(|word| word.text.trim_end().ends_with(OPEN_MARKS))
+        || words[index + 1..]
+            .iter()
+            .find(|word| !word.hidden)
+            .is_some_and(|word| word.text.trim_start().starts_with(CLOSE_MARKS))
+}
+
+fn book_title_gaps(words: &[CaptionWord]) -> Vec<bool> {
+    let mut gaps = vec![false; words.len().saturating_sub(1)];
+    let mut opener = None;
+    for (index, word) in words.iter().enumerate().filter(|(_, word)| !word.hidden) {
+        for character in word.text.chars() {
+            if character == '《' {
+                opener = Some(index);
+            } else if character == '》'
+                && let Some(start) = opener.take()
+                && words[start..=index].iter().map(word_width).sum::<f32>() <= MAX_LINE_WIDTH
+            {
+                gaps[start..index].fill(true);
+            }
+        }
+    }
+    gaps
+}
+
 /// The cost of ending a line after word `index`. Lower is a better place.
 fn break_cost(words: &[CaptionWord], hints: &BreakHints, index: usize) -> f32 {
     let text = &words[index].text;
@@ -114,6 +163,9 @@ fn break_cost(words: &[CaptionWord], hints: &BreakHints, index: usize) -> f32 {
     }
     if hints.inside_word.get(index).copied().unwrap_or(false) {
         cost += 40.0;
+    }
+    if orphaned_punctuation(words, index) {
+        cost += 120.0;
     }
     cost
 }
@@ -205,6 +257,7 @@ pub fn plan_caption_lines(words: &[CaptionWord], hints: &BreakHints) -> Vec<Rang
     let forced: Vec<bool> = (0..count.saturating_sub(1))
         .map(|index| gap_after(words, index) >= FORCED_GAP)
         .collect();
+    let book_titles = book_title_gaps(words);
     let mut best = vec![f32::INFINITY; count + 1];
     let mut from = vec![0usize; count + 1];
     best[0] = 0.0;
@@ -225,7 +278,7 @@ pub fn plan_caption_lines(words: &[CaptionWord], hints: &BreakHints) -> Vec<Rang
             let ends = if end == count || forced[end - 1] {
                 0.0
             } else {
-                break_cost(words, hints, end - 1)
+                break_cost(words, hints, end - 1) + if book_titles[end - 1] { 60.0 } else { 0.0 }
             };
             let cost = best[start]
                 + line_cost(width, seconds, start == 0 && end == count)
@@ -260,11 +313,21 @@ pub fn segments_from_lines(
         .enumerate()
         .map(|(index, line)| {
             let mut words = words[line.clone()].to_vec();
-            if let Some(last) = words.last_mut() {
-                let trimmed = last.text.trim_end_matches(['，', '。', '、', '；', '：']);
-                if !trimmed.is_empty() {
-                    last.text = trimmed.to_string();
+            for last in words.iter_mut().rev().filter(|word| !word.hidden) {
+                let text = last.text.trim_end();
+                let trimmed = if text.ends_with("...") {
+                    text
+                } else {
+                    text.trim_end_matches(['，', '。', '、', ',', '.'])
+                };
+                if trimmed.is_empty() {
+                    last.hidden = true;
+                    continue;
                 }
+                if trimmed != last.text {
+                    last.text = trimmed.to_owned();
+                }
+                break;
             }
             CaptionSegment {
                 id: format!("{id_prefix}{index}"),
@@ -360,6 +423,44 @@ mod tests {
             time += 0.2;
         }
         words
+    }
+
+    #[test]
+    fn the_book_title_opener_moves_off_the_preceding_word() {
+        let mut words = chars("开发的一个网站叫《伊隆·马斯克全访谈》", &[]);
+        let previous = words.iter().position(|word| word.text == "叫《").unwrap();
+        let word_times = (words[previous + 1].start, words[previous + 1].end);
+        bind_opening_punctuation(&mut words);
+        assert_eq!(words[previous].text, "叫");
+        assert_eq!(words[previous + 1].text, "《伊");
+        assert_eq!(
+            (words[previous + 1].start, words[previous + 1].end),
+            word_times
+        );
+        assert!(!orphaned_punctuation(&words, previous));
+        let gaps = book_title_gaps(&words);
+        assert!(!gaps[previous]);
+        assert!(gaps[previous + 1]);
+        let planned = plan_caption_lines(&words, &BreakHints::default());
+        assert!(planned.iter().any(|line| {
+            let text = model_input(&words[line.clone()]);
+            text.contains("《伊隆·马斯克全访谈》")
+        }));
+    }
+
+    #[test]
+    fn caption_lines_drop_terminal_commas_and_periods_but_keep_questions_and_titles() {
+        let mut words = chars("我们来看看，什么情况？《新作品》。", &[]);
+        bind_opening_punctuation(&mut words);
+        let lines = [0..5, 5..9, 9..12];
+        let segments = segments_from_lines(&words, &lines, "caption-");
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>(),
+            ["我们来看看", "什么情况？", "《新作品》"]
+        );
     }
 
     fn lines(words: &[CaptionWord], hints: &BreakHints) -> Vec<String> {

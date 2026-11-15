@@ -350,3 +350,69 @@ fn custom_text_geometry_moves_and_scales_text_without_moving_the_cover_image() {
     segment.size.x = f64::NAN;
     assert!(title_card_text_bounds((1920, 1080), &segment).is_none());
 }
+
+#[test]
+fn a_subject_takes_one_side_and_the_title_the_other() {
+    use cap_project::{TitleCardSubject, TitleCardSubjectSide};
+    for template in [
+        TitleCardTemplate::Hero,
+        TitleCardTemplate::Editorial,
+        TitleCardTemplate::Split,
+    ] {
+        for side in [TitleCardSubjectSide::Left, TitleCardSubjectSide::Right] {
+            let mut segment = TextSegment::new_title_card(TitleCardRole::Intro, "录完就能发");
+            let card = segment.title_card.as_mut().unwrap();
+            card.template = template;
+            card.subject = Some(TitleCardSubject {
+                path: "content/images/person.png".into(),
+                side,
+                mirror: false,
+                pose: None,
+            });
+            let output = (1920, 1080);
+            let layout = segment_title_card_layout(output, &segment).unwrap();
+            let (region, placed_side) = layout.subject.unwrap();
+            assert_eq!(placed_side, side);
+            assert!(inside(layout.text, output));
+            assert!(separated(layout.text, region), "{template:?} {side:?}");
+            assert_eq!(layout.secondary, None);
+            match side {
+                TitleCardSubjectSide::Right => assert!(layout.text[2] <= 960.0),
+                TitleCardSubjectSide::Left => assert!(layout.text[0] >= 960.0),
+            }
+        }
+    }
+
+    let mut tall = TextSegment::new_title_card(TitleCardRole::Intro, "竖屏封面");
+    tall.title_card.as_mut().unwrap().subject = Some(TitleCardSubject {
+        path: "content/images/person.png".into(),
+        side: TitleCardSubjectSide::Right,
+        mirror: false,
+        pose: None,
+    });
+    let layout = segment_title_card_layout((1080, 1920), &tall).unwrap();
+    let (region, _) = layout.subject.unwrap();
+    assert!(layout.text[3] <= region[1] + 1920.0 * 0.05);
+    assert_eq!(region[3], 1920.0);
+}
+
+#[test]
+fn a_subject_stands_on_the_bottom_edge_against_its_side() {
+    use cap_project::TitleCardSubjectSide;
+    let region = [960.0, 40.0, 1920.0, 1080.0];
+    let right = subject_placement((600, 900), region, TitleCardSubjectSide::Right).unwrap();
+    assert_eq!(right[3], 1080.0);
+    assert_eq!(right[2], 1920.0);
+    assert!((right[3] - right[1] - 1040.0).abs() < 0.01);
+    let left = subject_placement(
+        (600, 900),
+        [0.0, 40.0, 960.0, 1080.0],
+        TitleCardSubjectSide::Left,
+    )
+    .unwrap();
+    assert_eq!(left[0], 0.0);
+    let wide = subject_placement((2000, 500), region, TitleCardSubjectSide::Right).unwrap();
+    assert!((wide[2] - wide[0] - 960.0).abs() < 0.01);
+    assert_eq!(wide[3], 1080.0);
+    assert!(subject_placement((0, 10), region, TitleCardSubjectSide::Right).is_none());
+}

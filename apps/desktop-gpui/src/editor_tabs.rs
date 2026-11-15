@@ -1310,6 +1310,7 @@ pub enum SidebarMenu {
     /// `KSelect`: it lists every installed family, so it filters as you type.
     /// See the README's font-picker deviation.
     TextFontFamily(usize),
+    CoverFontFamily(usize, usize),
     TextWeight(usize),
     Camera3DEasing(usize),
 }
@@ -1429,6 +1430,7 @@ impl EditorWindow {
                 .map(|(weight, label)| ui::MenuItem::new(label(), *weight == keyboard.font_weight))
                 .collect(),
             SidebarMenu::TextFontFamily(index)
+            | SidebarMenu::CoverFontFamily(index, _)
             | SidebarMenu::TextWeight(index)
             | SidebarMenu::Camera3DEasing(index) => self.panel_menu_items(kind, index),
         }
@@ -1695,6 +1697,7 @@ impl EditorWindow {
                 });
             }
             SidebarMenu::TextFontFamily(segment)
+            | SidebarMenu::CoverFontFamily(segment, _)
             | SidebarMenu::TextWeight(segment)
             | SidebarMenu::Camera3DEasing(segment) => {
                 self.choose_panel_menu(kind, segment, index, window, cx)
@@ -1709,7 +1712,7 @@ impl EditorWindow {
         cx: &mut Context<Self>,
         change: impl FnOnce(&mut CaptionSettings),
     ) {
-        self.set_caption_setting_inner(true, reason, window, cx, change);
+        self.set_caption_setting_inner(false, reason, window, cx, change);
     }
 
     fn set_caption_setting_inner(
@@ -2024,6 +2027,17 @@ impl EditorWindow {
     /// `CameraConfig` (`ConfigSidebar.tsx:2978-3330`).
     pub(crate) fn render_camera_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
+        if !self
+            .summary()
+            .is_some_and(|summary| summary.has_camera || summary.display_is_camera)
+            && self.sidebar.style_target.is_none()
+        {
+            return div()
+                .text_size(px(12.))
+                .text_color(Hsla::from(theme.editor.text_2))
+                .child(tr::editor::sidebar::tab::no_camera())
+                .into_any_element();
+        }
         if self
             .summary()
             .is_some_and(|summary| summary.display_is_camera && !summary.has_camera)
@@ -2034,7 +2048,7 @@ impl EditorWindow {
                 .gap(px(16.))
                 .child(crate::editor_sidebar::tab_header(
                     &theme,
-                    crate::editor_sidebar::SidebarTab::Camera.title(),
+                    tr::editor::sidebar::tab::camera(),
                     None,
                 ))
                 .child(self.slider_field(
@@ -2062,7 +2076,7 @@ impl EditorWindow {
 
         let header = crate::editor_sidebar::tab_header(
             &theme,
-            crate::editor_sidebar::SidebarTab::Camera.title(),
+            tr::editor::sidebar::tab::camera(),
             Some(
                 ui::Toggle::plain(&theme, "camera-show", !hidden)
                     .on_click(cx.listener(|this, _, window, cx| {

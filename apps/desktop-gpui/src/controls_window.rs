@@ -384,11 +384,6 @@ impl ControlsWindow {
             )
     }
 
-    /// The mic indicator: icon plus the live level track underneath
-    /// (`createAudioInputLevel` in the bar: -60..0 dB linear, blue-9 fill on a
-    /// gray-10 track). In instant mode with a live mic it doubles as the mute
-    /// button -- studio deliberately does not expose mute, since the mic is an
-    /// editable track and muted spans would bake zeros in.
     fn render_microphone(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let session = self.session.read(cx);
@@ -396,11 +391,26 @@ impl ControlsWindow {
         let can_mute = session.mode() == Some(RecordingMode::Instant)
             && session.has_microphone()
             && matches!(session.phase, Phase::Recording { .. });
+        let meter_active = session.has_microphone()
+            && !muted
+            && matches!(session.phase, Phase::Recording { paused: false });
+        let mic_tooltip = if !self.has_microphone {
+            tr::main::device::no_microphone()
+        } else if meter_active {
+            tr::editor::voiceover::input_level()
+        } else {
+            tr::main::device::microphone()
+        };
         self.level_bar.update(cx, |bar, cx| {
             bar.configure(
-                self.has_microphone && !muted,
-                theme.blue_9.into(),
-                theme.gray_10.into(),
+                meter_active,
+                theme.gray_12.into(),
+                if meter_active {
+                    theme.gray_6
+                } else {
+                    theme.gray_4
+                }
+                .into(),
                 cx,
             );
         });
@@ -421,13 +431,14 @@ impl ControlsWindow {
 
         div()
             .id("microphone")
-            .w(px(28.))
+            .w(px(if self.has_microphone { 60. } else { 28. }))
             .h(px(32.))
             .flex_shrink_0()
-            .relative()
             .flex()
             .items_center()
             .justify_center()
+            .gap(px(4.))
+            .tooltip(move |_, cx| ui::Tooltip::new(&theme, mic_tooltip).view(cx))
             .when(can_mute, |this| {
                 this.rounded(px(8.))
                     .hover(|style| style.bg(Theme::with_alpha(theme.gray_12, 0.06)))
@@ -438,7 +449,7 @@ impl ControlsWindow {
                     }))
             })
             .child(svg().path(icon).size(px(20.)).text_color(icon_color))
-            .when(self.has_microphone && !muted, |this| {
+            .when(self.has_microphone, |this| {
                 this.child(self.level_bar.clone())
             })
     }

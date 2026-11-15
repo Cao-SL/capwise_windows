@@ -371,6 +371,39 @@ fn card_metadata_rejects_unsafe_paths_unbounded_text_and_unknown_versions() {
 }
 
 #[test]
+fn card_subject_is_optional_roundtrips_and_rejects_unsafe_paths() {
+    let segment = card(TitleCardRole::Intro, 2.0);
+    let legacy = value(&segment);
+    assert!(legacy["titleCard"].get("subject").is_none());
+    let reopened: TextSegment = serde_json::from_value(legacy).unwrap();
+    assert_eq!(reopened.title_card.unwrap().subject, None);
+
+    let mut data = value(&segment);
+    data["titleCard"]["subject"] = json!({"path": "content/images/person.png"});
+    let reopened: TextSegment = serde_json::from_value(data).unwrap();
+    assert_eq!(
+        reopened.title_card.as_ref().unwrap().subject,
+        Some(TitleCardSubject {
+            path: "content/images/person.png".into(),
+            side: TitleCardSubjectSide::Right,
+            mirror: false,
+            pose: None,
+        })
+    );
+    let encoded = value(&reopened);
+    assert_eq!(encoded["titleCard"]["subject"]["side"], json!("right"));
+
+    for path in ["/Users/me/person.png", "../person.png", "a//b.png", ""] {
+        let mut data = value(&segment);
+        data["titleCard"]["subject"] = json!({"path": path, "side": "left", "mirror": true});
+        assert!(
+            serde_json::from_value::<TextSegment>(data).is_err(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn project_roundtrip_preserves_card_identity_background_and_fractional_hold() {
     let mut project = fixture();
     let mut outro = card(TitleCardRole::Outro, 0.1);
@@ -481,4 +514,117 @@ fn adding_a_card_migrates_legacy_body_text_once_without_rescaling_the_card() {
         reopened.title_card(TitleCardRole::Intro).unwrap().font_size,
         96.0
     );
+}
+
+#[test]
+fn cover_layers_are_optional_roundtrip_and_reject_unsafe_values() {
+    let segment = card(TitleCardRole::Intro, 2.0);
+    let legacy = value(&segment);
+    assert!(legacy["titleCard"].get("layers").is_none());
+    let reopened: TextSegment = serde_json::from_value(legacy).unwrap();
+    assert!(reopened.title_card.unwrap().layers.is_empty());
+
+    let pose = json!({"center": {"x": 0.3, "y": 0.4}, "size": {"x": 0.2, "y": 0.1}});
+    let mut data = value(&segment);
+    data["titleCard"]["layers"] = json!([
+        {"id": "a1", "pose": pose, "kind": {"type": "text", "content": "震惊"}},
+        {"id": "b2", "pose": pose, "kind": {"type": "image", "path": "content/images/x.png", "mirror": true}},
+    ]);
+    let reopened: TextSegment = serde_json::from_value(data).unwrap();
+    let layers = &reopened.title_card.as_ref().unwrap().layers;
+    assert_eq!(layers.len(), 2);
+    assert!(matches!(
+        &layers[0].kind,
+        CoverLayerKind::Text { color, stroke: None, .. } if color == "#FFFFFF"
+    ));
+    let encoded = value(&reopened);
+    assert_eq!(
+        encoded["titleCard"]["layers"][1]["kind"]["type"],
+        json!("image")
+    );
+    assert_eq!(
+        serde_json::from_value::<TextSegment>(encoded).unwrap(),
+        reopened
+    );
+
+    let bad = [
+        json!({"id": "a", "pose": pose, "kind": {"type": "image", "path": "../x.png"}}),
+        json!({"id": "a b", "pose": pose, "kind": {"type": "text", "content": "x"}}),
+        json!({"id": "a", "pose": pose, "kind": {"type": "text", "content": "x", "color": "red"}}),
+        json!({"id": "a", "pose": {"center": {"x": 0.5, "y": 0.5}, "size": {"x": 0.0, "y": 0.1}},
+               "kind": {"type": "text", "content": "x"}}),
+    ];
+    for layer in bad {
+        let mut data = value(&segment);
+        data["titleCard"]["layers"] = json!([layer]);
+        assert!(serde_json::from_value::<TextSegment>(data).is_err());
+    }
+    let mut data = value(&segment);
+    data["titleCard"]["layers"] = json!(
+        (0..=MAX_COVER_LAYERS)
+            .map(|i| json!({"id": format!("l{i}"), "pose": pose, "kind": {"type": "text", "content": "x"}}))
+            .collect::<Vec<_>>()
+    );
+    assert!(serde_json::from_value::<TextSegment>(data).is_err());
+}
+
+#[test]
+fn cover_image_crop_and_lock_round_trip_with_custom_text_sizing() {
+    let segment = card(TitleCardRole::Intro, 2.0);
+    let mut data = value(&segment);
+    let pose = json!({"center": {"x": 0.5, "y": 0.5}, "size": {"x": 0.4, "y": 0.2}, "rotation": 0.0, "opacity": 1.0});
+    data["titleCard"]["layers"] = json!([
+        {"id": "portrait", "pose": pose, "kind": {"type":"image", "path":"content/images/p.png"},
+         "locked": true, "imageCrop": [0.25, 0.0625, 0.5, 0.25]},
+        {"id": "words", "pose": pose, "kind": {"type":"text", "content":"Office", "color":"#FFFFFF", "stroke":"#111111", "band":"#000000"},
+         "fontSize": 92.0, "strokeWidth": 3.0, "bandOpacity": 0.75}
+    ]);
+    let reopened: TextSegment = serde_json::from_value(data.clone()).unwrap();
+    let layers = &reopened.title_card.as_ref().unwrap().layers;
+    assert!(layers[0].locked);
+    assert_eq!(layers[0].image_crop, Some([0.25, 0.0625, 0.5, 0.25]));
+    assert_eq!(layers[1].font_size, Some(92.));
+    assert_eq!(layers[1].stroke_width, Some(3.));
+    assert_eq!(layers[1].band_opacity, Some(0.75));
+    let encoded = value(&reopened);
+    assert_eq!(
+        serde_json::from_value::<TextSegment>(encoded).unwrap(),
+        reopened
+    );
+
+    data["titleCard"]["layers"][0]["imageCrop"] = json!([0.8, 0.0, 0.5, 1.0]);
+    assert!(serde_json::from_value::<TextSegment>(data.clone()).is_err());
+    data["titleCard"]["layers"][0]["imageCrop"] = json!([0.25, 0.0625, 0.5, 0.25]);
+    data["titleCard"]["layers"][1]["bandOpacity"] = json!(1.5);
+    assert!(serde_json::from_value::<TextSegment>(data).is_err());
+}
+
+#[test]
+fn a_card_has_at_most_one_title_layer_and_v1_layers_still_read() {
+    let segment = card(TitleCardRole::Intro, 2.0);
+    let pose = json!({"center": {"x": 0.5, "y": 0.5}, "size": {"x": 0.5, "y": 0.2}});
+    let mut data = value(&segment);
+    data["titleCard"]["layers"] = json!([
+        {"id": "t", "pose": pose, "kind": {"type": "title", "stroke": "#111111", "font": "Smiley Sans"}},
+        {"id": "v1", "pose": pose, "kind": {"type": "text", "content": "旧", "color": "#FFFFFF"}},
+        {"id": "p", "pose": pose, "kind": {"type": "image", "path": "content/images/p.png",
+            "persona": {"persona": "hanfu", "file": "hanfu-smile.webp"}}},
+    ]);
+    let reopened: TextSegment = serde_json::from_value(data.clone()).unwrap();
+    let card = reopened.title_card.as_ref().unwrap();
+    assert!(card.has_title_layer());
+    assert_eq!(
+        card.layers[0].kind.text_style().unwrap().font.as_deref(),
+        Some("Smiley Sans")
+    );
+    assert!(matches!(
+        &card.layers[1].kind,
+        CoverLayerKind::Text { font: None, .. }
+    ));
+
+    data["titleCard"]["layers"][1] = json!({"id": "t2", "pose": pose, "kind": {"type": "title"}});
+    assert!(serde_json::from_value::<TextSegment>(data.clone()).is_err());
+    data["titleCard"]["layers"][1] = json!({"id": "x", "pose": pose,
+        "kind": {"type": "image", "path": "content/images/p.png", "persona": {"persona": "../x", "file": "a"}}});
+    assert!(serde_json::from_value::<TextSegment>(data).is_err());
 }

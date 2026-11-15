@@ -148,8 +148,7 @@ pub fn picker_level(db: f64) -> f64 {
     (1.0 - ((db + 40.0).max(0.0) / 40.0)).max(0.0).sqrt()
 }
 
-/// How the recording bar maps dB to its little track: `createAudioInputLevel`
-/// in `in-progress-recording.tsx` (-60..0 dB, linear, 0 = silence).
+/// Linear dB display scale for the voiceover input meter.
 pub fn bar_level(db: f64) -> f64 {
     ((db + 60.0) / 60.0).clamp(0.0, 1.0)
 }
@@ -756,7 +755,7 @@ pub struct Feeds {
     /// Selected microphone name.
     pub microphone: Option<String>,
     mic_level: Entity<MicLevel>,
-    mic_level_shown: Arc<std::sync::atomic::AtomicU64>,
+    mic_level_shown: Arc<AtomicU64>,
     pub camera_error: Option<String>,
     camera_preview_parked: bool,
     /// Bumped on every camera/mic selection change; async completions from a
@@ -795,22 +794,50 @@ pub struct SelectedCamera {
 struct FeedsGlobal(Entity<Feeds>);
 impl Global for FeedsGlobal {}
 
-/// The live mic level: rolling 200ms max in dB FS, `-96` when absent. Kept
-/// out of `Feeds` because windows read device state from `Feeds` in render,
-/// so each of its notifies redraws them, and the level changes up to 20
-/// times a second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MeterLevels {
+    peak: f32,
+    recent: f32,
+}
+
+impl MeterLevels {
+    const SILENT: Self = Self::uniform(-96.0);
+
+    const fn uniform(db: f32) -> Self {
+        Self {
+            peak: db,
+            recent: db,
+        }
+    }
+
+    fn pack(self) -> u64 {
+        (u64::from(self.peak.to_bits()) << 32) | u64::from(self.recent.to_bits())
+    }
+
+    fn unpack(bits: u64) -> Self {
+        Self {
+            peak: f32::from_bits((bits >> 32) as u32),
+            recent: f32::from_bits(bits as u32),
+        }
+    }
+}
+
 pub struct MicLevel {
-    db: f64,
+    levels: MeterLevels,
 }
 
 impl MicLevel {
     pub fn db(&self) -> f64 {
-        self.db
+        f64::from(self.levels.peak)
     }
 
-    fn set(&mut self, db: f64, cx: &mut Context<Self>) {
-        if self.db != db {
-            self.db = db;
+    pub(crate) fn recent_db(&self) -> f64 {
+        f64::from(self.levels.recent)
+    }
+
+    fn set(&mut self, levels: MeterLevels, cx: &mut Context<Self>) {
+        if self.levels != levels {
+            self.levels = levels;
             cx.notify();
         }
     }
@@ -841,7 +868,9 @@ impl Feeds {
     }
 
     pub fn init(cx: &mut App) -> Entity<Self> {
-        let mic_level = cx.new(|_| MicLevel { db: -96.0 });
+        let mic_level = cx.new(|_| MicLevel {
+            levels: MeterLevels::SILENT,
+        });
         #[cfg(target_os = "macos")]
         let avatar = {
             let control = Arc::new(cap_recording::avatar::AvatarControl::default());
@@ -872,7 +901,7 @@ impl Feeds {
             camera: None,
             microphone: None,
             mic_level,
-            mic_level_shown: Arc::new(std::sync::atomic::AtomicU64::new((-96.0f64).to_bits())),
+            mic_level_shown: Arc::new(AtomicU64::new(MeterLevels::SILENT.pack())),
             camera_error: None,
             camera_preview_parked: false,
             camera_epoch: 0,
@@ -1279,7 +1308,7 @@ impl Feeds {
         self.microphone_error = None;
         self.mic_input_pending = label.is_some();
         self.mic_input_released = false;
-        self.set_mic_level(-96.0, cx);
+        self.set_mic_level(MeterLevels::SILENT, cx);
         let epoch = self.mic_epoch;
         let actor = self.ensure_mic_actor(cx);
         let gate = self.mic_input_gate.clone();
@@ -1401,7 +1430,7 @@ impl Feeds {
             })
             .detach();
         }
-        self.set_mic_level(-96.0, cx);
+        self.set_mic_level(MeterLevels::SILENT, cx);
         cx.notify();
     }
 
@@ -1409,9 +1438,9 @@ impl Feeds {
         &self.mic_level
     }
 
-    fn set_mic_level(&mut self, db: f64, cx: &mut Context<Self>) {
-        self.mic_level_shown.store(db.to_bits(), Ordering::Release);
-        self.mic_level.update(cx, |level, cx| level.set(db, cx));
+    fn set_mic_level(&mut self, levels: MeterLevels, cx: &mut Context<Self>) {
+        self.mic_level_shown.store(levels.pack(), Ordering::Release);
+        self.mic_level.update(cx, |level, cx| level.set(levels, cx));
     }
 
     fn ensure_camera_actor(&mut self, cx: &mut Context<Self>) -> ActorRef<CameraFeed> {
@@ -1524,22 +1553,47 @@ impl Feeds {
         // an audio callback (50-100/s) only wakes the UI when the level it
         // would draw has changed.
         let (wake, wakes) = flume::bounded::<()>(1);
-        let latest = Arc::new(std::sync::atomic::AtomicU64::new((-96.0f64).to_bits()));
+        let latest = Arc::new(AtomicU64::new(MeterLevels::SILENT.pack()));
         let mut sender = MeterSender {
             window: MeterWindow::default(),
             shown: self.mic_level_shown.clone(),
             latest: latest.clone(),
             wake,
         };
+        let executor = cx.background_executor().clone();
         let meter = cx.background_executor().spawn(async move {
+            let stale_after = Duration::from_millis(250);
             while let Ok(samples) = meter_rx.recv_async().await {
-                sender.push(Instant::now(), db_fs(&samples));
+                let mut last_sample = Instant::now();
+                sender.push(last_sample, db_fs(&samples));
+                loop {
+                    let deadline = executor.timer(stale_after);
+                    tokio::pin!(deadline);
+                    loop {
+                        tokio::select! {
+                            sample = meter_rx.recv_async() => {
+                                let Ok(samples) = sample else {
+                                    sender.clear();
+                                    return;
+                                };
+                                last_sample = Instant::now();
+                                sender.push(last_sample, db_fs(&samples));
+                            }
+                            () = &mut deadline => break,
+                        }
+                    }
+                    if last_sample.elapsed() >= stale_after {
+                        sender.clear();
+                        break;
+                    }
+                }
             }
+            sender.clear();
         });
         let pump = cx.spawn(async move |this, cx| {
             let _meter = meter;
             while wakes.recv_async().await.is_ok() {
-                let level = f64::from_bits(latest.load(Ordering::Acquire));
+                let level = MeterLevels::unpack(latest.load(Ordering::Acquire));
                 if this
                     .update(cx, |this: &mut Feeds, cx| this.set_mic_level(level, cx))
                     .is_err()
@@ -1623,8 +1677,6 @@ pub(crate) fn camera_preview_image(
 /// `picker_level` at -40 dB, so anything below looks identical everywhere.
 const METER_FLOOR_DB: f64 = -60.0;
 
-/// A 200ms max-hold window, coalesced to ~20 updates/s and quantized to
-/// 0.5dB (under a pixel on both level mappings).
 #[derive(Default)]
 struct MeterWindow {
     entries: Vec<(Instant, f64)>,
@@ -1632,7 +1684,7 @@ struct MeterWindow {
 }
 
 impl MeterWindow {
-    fn push(&mut self, now: Instant, db: f64) -> Option<f64> {
+    fn push(&mut self, now: Instant, db: f64) -> Option<MeterLevels> {
         self.entries.push((now, db));
         self.entries
             .retain(|(at, _)| now.saturating_duration_since(*at) <= Duration::from_millis(200));
@@ -1643,12 +1695,19 @@ impl MeterWindow {
             return None;
         }
         self.last_push = Some(now);
-        let max = self
-            .entries
-            .iter()
-            .map(|(_, db)| *db)
-            .fold(f64::MIN, f64::max);
-        Some((max * 2.0).round() / 2.0)
+        let mut peak = METER_FLOOR_DB;
+        let mut recent = METER_FLOOR_DB;
+        for &(time, db) in &self.entries {
+            peak = peak.max(db);
+            if now.saturating_duration_since(time) <= Duration::from_millis(60) {
+                recent = recent.max(db);
+            }
+        }
+        let quantize = |db: f64| ((db * 2.0).round() / 2.0) as f32;
+        Some(MeterLevels {
+            peak: quantize(peak),
+            recent: quantize(recent),
+        })
     }
 }
 
@@ -1656,8 +1715,8 @@ impl MeterWindow {
 /// current level rather than a queued one.
 struct MeterSender {
     window: MeterWindow,
-    shown: Arc<std::sync::atomic::AtomicU64>,
-    latest: Arc<std::sync::atomic::AtomicU64>,
+    shown: Arc<AtomicU64>,
+    latest: Arc<AtomicU64>,
     wake: flume::Sender<()>,
 }
 
@@ -1666,9 +1725,18 @@ impl MeterSender {
         let Some(level) = self.window.push(now, db) else {
             return;
         };
-        let level = level.max(METER_FLOOR_DB);
-        self.latest.store(level.to_bits(), Ordering::Release);
-        if level.to_bits() != self.shown.load(Ordering::Acquire) {
+        self.publish(level);
+    }
+
+    fn clear(&mut self) {
+        self.window = MeterWindow::default();
+        self.publish(MeterLevels::uniform(METER_FLOOR_DB as f32));
+    }
+
+    fn publish(&self, level: MeterLevels) {
+        let bits = level.pack();
+        self.latest.store(bits, Ordering::Release);
+        if bits != self.shown.load(Ordering::Acquire) {
             let _ = self.wake.try_send(());
         }
     }
@@ -1821,24 +1889,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn meter_window_coalesces_to_one_update_per_50ms_with_a_200ms_max_hold() {
+    fn the_recording_level_releases_faster_than_the_held_peak() {
         let start = Instant::now();
         let mut window = MeterWindow::default();
         let at = |ms: u64| start + Duration::from_millis(ms);
-        assert_eq!(window.push(at(0), -20.2), Some(-20.0));
+        assert_eq!(window.push(at(0), -20.2), Some(MeterLevels::uniform(-20.0)));
         assert_eq!(window.push(at(10), -10.0), None);
         assert_eq!(window.push(at(49), -30.0), None);
-        assert_eq!(window.push(at(50), -40.0), Some(-10.0));
-        assert_eq!(window.push(at(205), -50.0), Some(-10.0));
-        assert_eq!(window.push(at(260), -50.0), Some(-50.0));
+        assert_eq!(
+            window.push(at(50), -40.0),
+            Some(MeterLevels::uniform(-10.0))
+        );
+        assert_eq!(
+            window.push(at(105), -45.0),
+            Some(MeterLevels {
+                peak: -10.0,
+                recent: -30.0
+            })
+        );
+        assert_eq!(
+            window.push(at(310), -50.0),
+            Some(MeterLevels::uniform(-50.0))
+        );
     }
 
     #[test]
     fn the_meter_wakes_the_ui_for_new_levels_only_and_keeps_the_newest() {
-        use std::sync::atomic::AtomicU64;
-
-        let shown = Arc::new(AtomicU64::new((-96.0f64).to_bits()));
-        let latest = Arc::new(AtomicU64::new((-96.0f64).to_bits()));
+        let shown = Arc::new(AtomicU64::new(MeterLevels::SILENT.pack()));
+        let latest = Arc::new(AtomicU64::new(MeterLevels::SILENT.pack()));
         let (wake, wakes) = flume::bounded(1);
         let mut sender = MeterSender {
             window: MeterWindow::default(),
@@ -1857,9 +1935,12 @@ mod tests {
         }
         assert_eq!(wakes.try_recv(), Ok(()));
         assert!(wakes.try_recv().is_err());
-        assert_eq!(f64::from_bits(latest.load(Ordering::Acquire)), -30.0);
+        assert_eq!(
+            MeterLevels::unpack(latest.load(Ordering::Acquire)),
+            MeterLevels::uniform(-30.0)
+        );
 
-        shown.store((-30.0f64).to_bits(), Ordering::Release);
+        shown.store(MeterLevels::uniform(-30.0).pack(), Ordering::Release);
         for callback in 50..150 {
             sender.push(at(callback), -30.0);
         }
@@ -1867,11 +1948,38 @@ mod tests {
     }
 
     #[test]
-    fn input_below_every_meter_floor_never_wakes_the_ui() {
-        use std::sync::atomic::AtomicU64;
+    fn clearing_the_meter_drops_its_peak_and_wakes_the_display() {
+        let shown = Arc::new(AtomicU64::new(MeterLevels::uniform(-12.0).pack()));
+        let latest = Arc::new(AtomicU64::new(MeterLevels::uniform(-12.0).pack()));
+        let (wake, wakes) = flume::bounded(1);
+        let mut sender = MeterSender {
+            window: MeterWindow::default(),
+            shown,
+            latest: latest.clone(),
+            wake,
+        };
+        let now = Instant::now();
+        sender.push(now, -12.0);
+        assert!(wakes.try_recv().is_err());
 
-        let shown = Arc::new(AtomicU64::new((-96.0f64).to_bits()));
-        let latest = Arc::new(AtomicU64::new((-96.0f64).to_bits()));
+        sender.clear();
+        assert_eq!(wakes.try_recv(), Ok(()));
+        assert_eq!(
+            MeterLevels::unpack(latest.load(Ordering::Acquire)),
+            MeterLevels::uniform(METER_FLOOR_DB as f32)
+        );
+
+        sender.push(now, -30.0);
+        assert_eq!(
+            MeterLevels::unpack(latest.load(Ordering::Acquire)),
+            MeterLevels::uniform(-30.0)
+        );
+    }
+
+    #[test]
+    fn input_below_every_meter_floor_never_wakes_the_ui() {
+        let shown = Arc::new(AtomicU64::new(MeterLevels::SILENT.pack()));
+        let latest = Arc::new(AtomicU64::new(MeterLevels::SILENT.pack()));
         let (wake, wakes) = flume::bounded(1);
         let mut sender = MeterSender {
             window: MeterWindow::default(),
@@ -1885,11 +1993,14 @@ mod tests {
         sender.push(at(0), -72.0);
         assert_eq!(wakes.try_recv(), Ok(()));
         assert_eq!(
-            f64::from_bits(latest.load(Ordering::Acquire)),
-            METER_FLOOR_DB
+            MeterLevels::unpack(latest.load(Ordering::Acquire)),
+            MeterLevels::uniform(METER_FLOOR_DB as f32)
         );
 
-        shown.store(METER_FLOOR_DB.to_bits(), Ordering::Release);
+        shown.store(
+            MeterLevels::uniform(METER_FLOOR_DB as f32).pack(),
+            Ordering::Release,
+        );
         for callback in 1..400 {
             let db = -96.0 + (callback % 7) as f64 * 5.0;
             sender.push(at(callback), db);
@@ -1899,7 +2010,10 @@ mod tests {
         sender.push(at(400), -42.0);
         sender.push(at(410), -42.0);
         assert_eq!(wakes.try_recv(), Ok(()));
-        assert_eq!(f64::from_bits(latest.load(Ordering::Acquire)), -42.0);
+        assert_eq!(
+            MeterLevels::unpack(latest.load(Ordering::Acquire)),
+            MeterLevels::uniform(-42.0)
+        );
         assert_eq!(picker_level(METER_FLOOR_DB), picker_level(-96.0));
         assert_eq!(bar_level(METER_FLOOR_DB), bar_level(-96.0));
     }

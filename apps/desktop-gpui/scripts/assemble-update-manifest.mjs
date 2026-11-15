@@ -70,7 +70,12 @@ for (const [platform, name, tag, magic] of packages) {
 		},
 	);
 	const signature = (await readFile(signatureFile)).toString("base64");
-	platforms[platform] = { url: `${releaseUrl}/${tag}/${name}`, signature };
+	const url = `${releaseUrl}/${tag}/${name}`;
+	const previous = base.platforms?.[platform];
+	platforms[platform] =
+		previous?.url === url && previous?.deltas
+			? { url, signature, deltas: previous.deltas }
+			: { url, signature };
 }
 
 const previousArm = base.platforms?.["darwin-aarch64"];

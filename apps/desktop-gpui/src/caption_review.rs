@@ -1,4 +1,9 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex, PoisonError},
+    time::{Duration, SystemTime},
+};
 
 use cap_project::{CaptionSegment, ProjectConfiguration};
 use gpui::{
@@ -83,6 +88,8 @@ struct Reply {
 struct Evidence {
     original: Vec<CaptionSegment>,
     changes: Vec<Change>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    applied_changes: Option<Vec<Change>>,
     provider: String,
     model: String,
     prompt: String,
@@ -257,6 +264,115 @@ fn processing(path: &Path) -> Result<Option<Processing>, ProcessingReadError> {
         }
         Err(error) => Err(ProcessingReadError::Unreadable(error)),
     }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ProcessingStamp {
+    file: Option<(SystemTime, u64, u64)>,
+    reviews: Option<SystemTime>,
+}
+
+impl ProcessingStamp {
+    fn of(path: &Path) -> Option<Self> {
+        fn modified(metadata: &std::fs::Metadata) -> Option<SystemTime> {
+            metadata.modified().ok()
+        }
+        #[cfg(unix)]
+        fn inode(metadata: &std::fs::Metadata) -> u64 {
+            std::os::unix::fs::MetadataExt::ino(metadata)
+        }
+        #[cfg(not(unix))]
+        fn inode(_: &std::fs::Metadata) -> u64 {
+            0
+        }
+        let file = match std::fs::metadata(path.join(PROCESS_FILE)) {
+            Ok(metadata) => Some((modified(&metadata)?, metadata.len(), inode(&metadata))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        let reviews = if file.is_some() {
+            None
+        } else {
+            match std::fs::metadata(path.join("caption-reviews")) {
+                Ok(metadata) => Some(modified(&metadata)?),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return None,
+            }
+        };
+        Some(Self { file, reviews })
+    }
+
+    fn settled(&self, now: SystemTime) -> bool {
+        const SETTLE: Duration = Duration::from_secs(1);
+        [self.file.map(|(modified, _, _)| modified), self.reviews]
+            .into_iter()
+            .flatten()
+            .all(|modified| modified.checked_add(SETTLE).is_some_and(|at| at < now))
+    }
+}
+
+#[derive(Clone)]
+struct ProcessingProblem {
+    message: String,
+    repairable: bool,
+}
+
+/// What the captions sidebar draws from the processing record. Render reads
+/// it on every frame while someone types in a caption, so it comes from a
+/// cache that only re-reads the file once its stamp moves.
+#[derive(Clone)]
+struct ProcessingView {
+    status: Option<ProcessingStatus>,
+    problem: Option<ProcessingProblem>,
+}
+
+impl ProcessingView {
+    fn read(path: &Path) -> Self {
+        match processing(path) {
+            Ok(request) => Self {
+                status: request.map(|request| request.status),
+                problem: None,
+            },
+            Err(error) => Self {
+                status: None,
+                problem: Some(ProcessingProblem {
+                    message: error.to_string(),
+                    repairable: error.repairable(),
+                }),
+            },
+        }
+    }
+}
+
+pub(crate) struct CaptionReviewMarks<'a> {
+    sources: HashMap<&'a str, &'a CaptionSegment>,
+    marks: HashMap<&'a str, Vec<(usize, bool)>>,
+}
+
+type ProcessingViews = HashMap<PathBuf, (ProcessingStamp, Arc<ProcessingView>)>;
+
+static PROCESSING_VIEWS: LazyLock<Mutex<ProcessingViews>> = LazyLock::new(Default::default);
+
+fn processing_view(path: &Path) -> Arc<ProcessingView> {
+    let now = SystemTime::now();
+    let Some(stamp) = ProcessingStamp::of(path) else {
+        return Arc::new(ProcessingView::read(path));
+    };
+    let mut views = PROCESSING_VIEWS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some((cached, view)) = views.get(path)
+        && *cached == stamp
+    {
+        return view.clone();
+    }
+    let view = Arc::new(ProcessingView::read(path));
+    if stamp.settled(now) {
+        views.insert(path.to_path_buf(), (stamp, view.clone()));
+    } else {
+        views.remove(path);
+    }
+    view
 }
 
 pub(crate) fn processing_problem(path: &Path) -> Option<String> {
@@ -705,7 +821,7 @@ fn latest_review(project: &Path) -> Option<Vec<Change>> {
         .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
         .max_by_key(|(modified, _)| *modified)?;
     let evidence: Evidence = serde_json::from_slice(&std::fs::read(newest.1).ok()?).ok()?;
-    Some(evidence.changes)
+    Some(evidence.applied_changes.unwrap_or(evidence.changes))
 }
 
 /// A review change still visible in the captions: the word keeps the text and
@@ -987,6 +1103,79 @@ where
     }
 }
 
+struct ReviewedLines {
+    segments: Vec<CaptionSegment>,
+    changes: Vec<Change>,
+}
+
+async fn reflow_reviewed_lines(
+    provider: &llm::ContentModel,
+    source: &[CaptionSegment],
+    changes: &[Change],
+) -> Option<ReviewedLines> {
+    use cap_project::caption_breaks::{bind_opening_punctuation, reads_as_chinese};
+    let mut offsets = HashMap::new();
+    let mut words = Vec::new();
+    for segment in source {
+        if offsets
+            .insert(segment.id.as_str(), (words.len(), segment.words.len()))
+            .is_some()
+        {
+            return None;
+        }
+        words.extend(segment.words.iter().cloned());
+    }
+    if !reads_as_chinese(&words) {
+        return None;
+    }
+    let position = |change: &Change| {
+        let &(offset, count) = offsets.get(change.segment_id.as_str())?;
+        (change.word_index < count).then_some(offset + change.word_index)
+    };
+    for change in changes {
+        let word = words.get_mut(position(change)?)?;
+        if word.text != change.before || word.hidden {
+            return None;
+        }
+        word.text.clone_from(&change.after);
+        word.hidden = change.hide;
+    }
+    bind_opening_punctuation(&mut words);
+    let (preferred, _, _) = crate::caption_breaks::model_preferences(provider, &words).await;
+    let segments = crate::caption_breaks::planned_segments(&words, preferred);
+    if segments
+        .iter()
+        .map(|segment| segment.words.len())
+        .sum::<usize>()
+        != words.len()
+    {
+        return None;
+    }
+    let locations: Vec<_> = segments
+        .iter()
+        .flat_map(|segment| {
+            segment
+                .words
+                .iter()
+                .enumerate()
+                .map(|(index, word)| (segment.id.as_str(), index, word))
+        })
+        .collect();
+    let changes = changes
+        .iter()
+        .filter_map(|original| {
+            let &(segment_id, word_index, word) = locations.get(position(original)?)?;
+            let mut change = original.clone();
+            change.segment_id = segment_id.to_owned();
+            change.word_index = word_index;
+            change.after.clone_from(&word.text);
+            change.hide = word.hidden;
+            Some(change)
+        })
+        .collect();
+    Some(ReviewedLines { segments, changes })
+}
+
 fn apply_changes(
     project: &mut ProjectConfiguration,
     expected: &[CaptionSegment],
@@ -1033,6 +1222,21 @@ fn apply_changes(
 }
 
 impl EditorWindow {
+    pub(crate) fn caption_optimization_will_reflow(&self) -> bool {
+        processing(&self.project_path)
+            .ok()
+            .flatten()
+            .is_some_and(|request| {
+                request.review
+                    && matches!(
+                        request.status,
+                        ProcessingStatus::AwaitingSave
+                            | ProcessingStatus::Queued
+                            | ProcessingStatus::Reviewing,
+                    )
+            })
+    }
+
     fn read_caption_processing(
         &mut self,
         cx: &mut Context<Self>,
@@ -1385,12 +1589,8 @@ impl EditorWindow {
                     .iter()
                     .any(|segment| !segment.words.is_empty())
         });
-        let loaded = processing(&self.project_path);
-        let waiting_save = loaded
-            .as_ref()
-            .ok()
-            .and_then(Option::as_ref)
-            .is_some_and(|request| request.status == ProcessingStatus::AwaitingSave);
+        let loaded = processing_view(&self.project_path);
+        let waiting_save = loaded.status == Some(ProcessingStatus::AwaitingSave);
         let mut button = ui::EditorButton::plain(&theme, "caption-review-start")
             .tinted(&theme)
             .height(px(32.))
@@ -1411,7 +1611,7 @@ impl EditorWindow {
                     || generating.generating
                     || generating.refining
                     || waiting_save
-                    || loaded.is_err()
+                    || loaded.problem.is_some()
                     || !has_words,
             )
             .on_click(cx.listener(|this, _, window, cx| {
@@ -1431,13 +1631,11 @@ impl EditorWindow {
         let theme = self.theme;
         let state = &self.sidebar.caption_review;
         let generating = crate::transcription::ui_snapshot(&self.project_path);
-        let loaded = processing(&self.project_path);
-        let request = loaded.as_ref().ok().and_then(Option::as_ref);
-        let waiting_save = request
-            .as_ref()
-            .is_some_and(|request| request.status == ProcessingStatus::AwaitingSave);
+        let loaded = processing_view(&self.project_path);
+        let status = loaded.status;
+        let waiting_save = status == Some(ProcessingStatus::AwaitingSave);
         let mut column = div().flex().flex_col().gap(px(8.));
-        if let Err(problem) = &loaded {
+        if let Some(problem) = &loaded.problem {
             let busy = state.running
                 || self.sidebar.caption_translation.is_running()
                 || generating.generating
@@ -1448,8 +1646,8 @@ impl EditorWindow {
                         .text_size(px(12.))
                         .child(tr::editor::review::recovery_notice()),
                 )
-                .child(div().text_size(px(11.)).child(problem.to_string()));
-            if problem.repairable() {
+                .child(div().text_size(px(11.)).child(problem.message.clone()));
+            if problem.repairable {
                 column = column
                     .child(
                         ui::Button::plain(
@@ -1490,15 +1688,15 @@ impl EditorWindow {
                     .child(tr::editor::review::waiting_save()),
             );
         }
-        if request.as_ref().is_some_and(|request| {
+        if status.is_some_and(|status| {
             matches!(
-                request.status,
+                status,
                 ProcessingStatus::AwaitingSave
                     | ProcessingStatus::FailedReview
                     | ProcessingStatus::FailedTranslation
             ) || (state.error.is_some()
                 && matches!(
-                    request.status,
+                    status,
                     ProcessingStatus::Queued | ProcessingStatus::Reviewed
                 ))
         }) {
@@ -1540,9 +1738,9 @@ impl EditorWindow {
         }
         if let Some(error) = &state.error
             && loaded
+                .problem
                 .as_ref()
-                .err()
-                .is_none_or(|problem| problem.to_string() != *error)
+                .is_none_or(|problem| problem.message != *error)
         {
             column = column.child(div().text_size(px(12.)).child(error.clone()));
         }
@@ -1584,21 +1782,55 @@ impl EditorWindow {
     }
 
     fn live_review_changes(&self) -> Vec<(usize, &Change)> {
+        let changes = &self.sidebar.caption_review.last;
         let Some(captions) = self.project.captions.as_ref() else {
             return Vec::new();
         };
-        self.sidebar
-            .caption_review
-            .last
+        if changes.is_empty() {
+            return Vec::new();
+        }
+        let mut sources = HashMap::<&str, Vec<&CaptionSegment>>::new();
+        for segment in &captions.segments {
+            sources
+                .entry(segment.id.as_str())
+                .or_default()
+                .push(segment);
+        }
+        changes
             .iter()
             .enumerate()
             .filter(|(_, change)| {
-                captions
-                    .segments
-                    .iter()
-                    .any(|segment| change_in_effect(segment, change))
+                sources
+                    .get(change.segment_id.as_str())
+                    .is_some_and(|segments| {
+                        segments
+                            .iter()
+                            .any(|segment| change_in_effect(segment, change))
+                    })
             })
             .collect()
+    }
+
+    /// The live review marks of every line, gathered once for a whole list
+    /// render rather than once per row.
+    pub(crate) fn caption_review_marks(&self) -> Option<CaptionReviewMarks<'_>> {
+        let live = self.live_review_changes();
+        if live.is_empty() {
+            return None;
+        }
+        let captions = self.project.captions.as_ref()?;
+        let mut sources = HashMap::new();
+        for segment in &captions.segments {
+            sources.entry(segment.id.as_str()).or_insert(segment);
+        }
+        let mut marks = HashMap::<&str, Vec<(usize, bool)>>::new();
+        for (_, change) in live {
+            marks
+                .entry(change.segment_id.as_str())
+                .or_default()
+                .push((change.word_index, change.hide));
+        }
+        Some(CaptionReviewMarks { sources, marks })
     }
 
     fn review_source(&self, track_id: &str) -> Option<&CaptionSegment> {
@@ -1643,7 +1875,7 @@ impl EditorWindow {
             true,
             cx,
         );
-        self.seek_to_time(time, cx);
+        self.seek_to_caption_time(time, cx);
         self.focus_root(window, cx);
         cx.notify();
     }
@@ -1651,17 +1883,18 @@ impl EditorWindow {
     /// The line as the review left it: corrected words tinted, hidden fillers
     /// struck through. `None` when the review changed nothing here, or when a
     /// cut split the line and its words no longer match the source one to one.
-    pub(crate) fn render_caption_review_text(&self, track_id: &str) -> Option<AnyElement> {
-        let source = self.review_source(track_id)?;
+    pub(crate) fn render_caption_review_text(
+        &self,
+        track_id: &str,
+        review: &CaptionReviewMarks<'_>,
+    ) -> Option<AnyElement> {
+        let source = *review
+            .sources
+            .get(cap_project::source_caption_id(track_id))?;
         if source.id != track_id {
             return None;
         }
-        let live = self.live_review_changes();
-        let marks = live
-            .iter()
-            .filter(|(_, change)| change.segment_id == source.id)
-            .map(|(_, change)| (change.word_index, change.hide))
-            .collect::<Vec<_>>();
+        let marks = review.marks.get(source.id.as_str())?;
         if marks.is_empty() {
             return None;
         }
@@ -1810,6 +2043,7 @@ impl EditorWindow {
     fn start_caption_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = crate::transcription::ui_snapshot(&self.project_path);
         if self.sidebar.caption_review.running
+            || self.sidebar.caption_resplit.running
             || self.sidebar.caption_translation.is_running()
             || state.generating
             || state.refining
@@ -1824,6 +2058,21 @@ impl EditorWindow {
         else {
             return;
         };
+        let reflow = captions.settings.translations.is_empty()
+            && captions
+                .segments
+                .iter()
+                .all(|segment| !segment.words.is_empty())
+            && self.project.timeline.as_ref().is_none_or(|timeline| {
+                timeline.caption_segments.iter().all(|segment| {
+                    segment.fade_duration_override.is_none()
+                        && segment.linger_duration_override.is_none()
+                        && segment.position_override.is_none()
+                        && segment.color_override.is_none()
+                        && segment.background_color_override.is_none()
+                        && segment.font_size_override.is_none()
+                })
+            });
         let original = captions.segments.clone();
         let initial_content = caption_content_snapshot(&self.project);
         if original.iter().all(|segment| segment.words.is_empty()) {
@@ -1904,11 +2153,21 @@ impl EditorWindow {
                             provider.chat_json(session, prompt, &message).await
                         }).await?);
                     }
-                    let evidence = Evidence { original: task_original, changes: changes.clone(), provider: provider_id, model, prompt };
+                    let lines = if reflow {
+                        reflow_reviewed_lines(&provider, &task_original, &changes).await
+                    } else {
+                        None
+                    };
+                    let evidence = Evidence {
+                        original: task_original,
+                        changes: changes.clone(),
+                        applied_changes: lines.as_ref().map(|lines| lines.changes.clone()),
+                        provider: provider_id, model, prompt,
+                    };
                     let directory = task_path.join("caption-reviews");
                     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
                     write_json(&directory.join(format!("review-{}.json", uuid::Uuid::new_v4())), &evidence)?;
-                    Ok::<_, String>(changes)
+                    Ok::<_, String>((changes, lines))
                 };
                 tokio::select! { biased; _ = &mut receiver => None, result = work => Some(result) }
             });
@@ -1919,9 +2178,21 @@ impl EditorWindow {
                 this.sidebar.caption_review.cancel = None;
                 let unchanged = this.project_path == path && caption_content_snapshot(&this.project) == initial_content;
                 let outcome = match result {
-                    Ok(changes) if unchanged => (|| {
+                    Ok((changes, lines)) if unchanged => (|| {
                         let mut next = this.project.clone();
-                        apply_changes(&mut next, &original, &changes, &durations);
+                        let changes = match lines {
+                            Some(lines) => {
+                                if let Some(captions) = next.captions.as_mut() {
+                                    captions.segments = lines.segments;
+                                    cap_project::synchronize_captions(&mut next, &durations);
+                                }
+                                lines.changes
+                            }
+                            None => {
+                                apply_changes(&mut next, &original, &changes, &durations);
+                                changes
+                            }
+                        };
                         let mut request = processing(&path).map_err(|error| error.to_string())?.ok_or_else(|| tr::editor::review::interrupted().to_string())?;
                         request.wait_for_save(&next, ProcessingStatus::Reviewed);
                         save_processing(&path, &request)?;
@@ -2258,6 +2529,34 @@ mod tests {
             recognition_pending: false,
             error: None,
         }
+    }
+
+    #[test]
+    fn the_cached_processing_view_follows_every_rewrite_of_the_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path();
+        let project = ProjectConfiguration::default();
+        assert!(processing_view(path).status.is_none());
+
+        let mut queued = request(&project);
+        save_processing(path, &queued).unwrap();
+        assert_eq!(processing_view(path).status, Some(ProcessingStatus::Queued));
+
+        queued.status = ProcessingStatus::AwaitingSave;
+        save_processing(path, &queued).unwrap();
+        assert_eq!(
+            processing_view(path).status,
+            Some(ProcessingStatus::AwaitingSave)
+        );
+
+        std::fs::write(path.join(PROCESS_FILE), b"{").unwrap();
+        let view = processing_view(path);
+        assert!(view.status.is_none());
+        assert!(
+            view.problem
+                .as_ref()
+                .is_some_and(|problem| problem.repairable)
+        );
     }
 
     fn replace_first_word(project: &mut ProjectConfiguration, text: &str) {

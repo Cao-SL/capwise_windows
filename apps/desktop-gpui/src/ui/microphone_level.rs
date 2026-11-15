@@ -5,7 +5,7 @@ use gpui::{
 
 use crate::feeds::{self, Feeds, MicLevel};
 
-const RECORDING_BAR_TRACK_WIDTH: f32 = 20.;
+const RECORDING_METER_WIDTH: f32 = 32.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MicrophoneLevelKind {
@@ -22,16 +22,28 @@ impl MicrophoneLevelKind {
         }
         match self {
             Self::CaptureButton | Self::DeviceRow => (1. - feeds::picker_level(db)) as f32,
-            Self::RecordingBar | Self::Voiceover => feeds::bar_level(db) as f32,
+            Self::Voiceover => feeds::bar_level(db) as f32,
+            Self::RecordingBar => {
+                let speech = ((db + 54.) / 36.).clamp(0., 1.);
+                let headroom = ((db + 18.) / 18.).clamp(0., 1.);
+                (0.82 * speech + 0.18 * headroom) as f32
+            }
         }
     }
 
-    /// An upper bound on the fill's drawn width, in device pixels. The main
+    /// An upper bound on the fill's drawn extent, in device pixels. The main
     /// window meters are never wider than the window itself.
     fn span(self, viewport_width: f32, scale: f32) -> f32 {
         match self {
             Self::CaptureButton | Self::DeviceRow | Self::Voiceover => viewport_width * scale,
-            Self::RecordingBar => RECORDING_BAR_TRACK_WIDTH * scale,
+            Self::RecordingBar => RECORDING_METER_WIDTH * scale,
+        }
+    }
+
+    fn read_db(self, level: &MicLevel) -> f64 {
+        match self {
+            Self::RecordingBar => level.recent_db(),
+            _ => level.db(),
         }
     }
 
@@ -72,7 +84,7 @@ impl MicrophoneLevel {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe_in(level, window, |this, level, window, cx| {
-            this.level_db = level.read(cx).db();
+            this.level_db = this.kind.read_db(level.read(cx));
             if !this.active || !this.kind.shown(window) {
                 return;
             }
@@ -93,7 +105,7 @@ impl MicrophoneLevel {
         Self {
             kind,
             active: false,
-            level_db: level.read(cx).db(),
+            level_db: kind.read_db(level.read(cx)),
             fill: 0.,
             color: gpui::transparent_black(),
             track: gpui::transparent_black(),
@@ -211,23 +223,21 @@ impl Render for MicrophoneLevel {
                     .child(div().text_size(px(12.)).child(label))
             }
             MicrophoneLevelKind::RecordingBar => div()
-                .absolute()
-                .bottom(px(4.))
-                .left(px(4.))
-                .right(px(4.))
-                .h(px(2.))
+                .w(px(RECORDING_METER_WIDTH))
+                .h(px(4.))
+                .flex_shrink_0()
                 .rounded_full()
                 .overflow_hidden()
                 .bg(self.track)
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(gpui::relative(self.fill))
-                        .bg(self.color),
-                ),
+                .when(self.fill > 0., |meter| {
+                    meter.child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(self.fill))
+                            .rounded_full()
+                            .bg(self.color),
+                    )
+                }),
         }
     }
 }
@@ -285,27 +295,25 @@ mod tests {
             assert!(!px_moved(MicrophoneLevelKind::DeviceRow, -96., db, span));
         }
         let span = MicrophoneLevelKind::RecordingBar.span(0., 2.);
-        for db in [-96., -80., -60.5, -60.] {
+        for db in [-96., -80., -60., -54.] {
             assert!(!px_moved(MicrophoneLevelKind::RecordingBar, -96., db, span));
         }
         assert!(px_moved(
             MicrophoneLevelKind::RecordingBar,
             -96.,
-            -58.,
+            -50.,
             span
         ));
     }
 
     #[test]
-    fn the_recording_bar_repaints_per_device_pixel_of_its_track() {
+    fn the_recording_meter_gives_normal_speech_room_to_move() {
         let kind = MicrophoneLevelKind::RecordingBar;
-        assert!(!px_moved(kind, -30., -30.5, kind.span(0., 2.)));
-        assert!(px_moved(kind, -30., -32., kind.span(0., 2.)));
-        assert!(!px_moved(kind, -30., -31., kind.span(0., 1.)));
-        assert!(px_moved(kind, -30., -33., kind.span(0., 1.)));
-        assert_eq!(kind.fill(-96.) * kind.span(0., 2.), 0.);
-        assert_eq!(kind.fill(0.) * kind.span(0., 1.), 20.);
-        assert_eq!(kind.fill(0.) * kind.span(0., 2.), 40.);
+        let span = kind.span(0., 1.);
+        let widths = [-54., -42., -30., -18., 0.].map(|db| (kind.fill(db) * span).round());
+        assert_eq!(widths, [0., 9., 17., 26., 32.]);
+        assert_eq!(kind.fill(0.) * kind.span(0., 2.), 64.);
+        assert!(px_moved(kind, -30., -27., span));
     }
 
     #[test]
@@ -314,7 +322,7 @@ mod tests {
         assert_eq!(MicrophoneLevelKind::CaptureButton.fill(0.), 1.);
         assert_eq!(MicrophoneLevelKind::DeviceRow.fill(-40.), 0.);
         assert_eq!(MicrophoneLevelKind::RecordingBar.fill(-60.), 0.);
-        assert_eq!(MicrophoneLevelKind::RecordingBar.fill(-30.), 0.5);
+        assert_eq!(MicrophoneLevelKind::Voiceover.fill(-30.), 0.5);
         assert_eq!(
             MicrophoneLevelKind::CaptureButton.fill(f64::NEG_INFINITY),
             0.

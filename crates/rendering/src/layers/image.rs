@@ -354,6 +354,34 @@ fn visible_images(
         .collect()
 }
 
+fn posed_uniforms(
+    pose: &cap_project::LayerPose,
+    output: (u32, u32),
+    mirror: bool,
+) -> Option<ImageUniforms> {
+    let center_size = [
+        (pose.center.x * f64::from(output.0)) as f32,
+        (pose.center.y * f64::from(output.1)) as f32,
+        (pose.size.x * f64::from(output.0)) as f32,
+        (pose.size.y * f64::from(output.1)) as f32,
+    ];
+    if center_size
+        .iter()
+        .any(|value| !value.is_finite() || value.abs() > 1.0e7)
+        || center_size[2] <= 0.0
+        || center_size[3] <= 0.0
+    {
+        return None;
+    }
+    let (sin, cos) = (pose.rotation % 360.0).to_radians().sin_cos();
+    Some(ImageUniforms {
+        center_size,
+        rotation_opacity_radius: [cos, sin, pose.opacity.clamp(0.0, 1.0), 0.0],
+        flips: [if mirror { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        uv_rect: [0.0, 0.0, 1.0, 1.0],
+    })
+}
+
 fn texture_dimensions(width: u32, height: u32, max_dimension: u32) -> (u32, u32) {
     let scale = (MAX_RGBA_BYTES as f64 / (f64::from(width) * f64::from(height) * 4.0))
         .sqrt()
@@ -806,6 +834,140 @@ impl ImageLayer {
 
     pub fn has_content(&self) -> bool {
         !self.draws.is_empty()
+    }
+
+    pub(super) async fn prepare_title_card_subject(
+        &mut self,
+        constants: &RenderVideoConstants,
+        relative: &str,
+        region: [f32; 4],
+        side: cap_project::TitleCardSubjectSide,
+        mirror: bool,
+        pose: Option<(cap_project::LayerPose, (u32, u32))>,
+    ) -> Result<(), crate::RenderingError> {
+        self.draws.clear();
+        self.draw_tracks.clear();
+        let texture = self.project_texture(constants, relative).await?;
+        let uniforms = match pose {
+            Some((pose, output)) => posed_uniforms(&pose, output, mirror),
+            None => {
+                let bounds = crate::title_cards::subject_placement(
+                    (texture.width(), texture.height()),
+                    region,
+                    side,
+                )
+                .ok_or_else(|| {
+                    crate::RenderingError::TitleCard("Invalid subject framing".into())
+                })?;
+                Some(ImageUniforms {
+                    center_size: [
+                        (bounds[0] + bounds[2]) * 0.5,
+                        (bounds[1] + bounds[3]) * 0.5,
+                        bounds[2] - bounds[0],
+                        bounds[3] - bounds[1],
+                    ],
+                    rotation_opacity_radius: [1.0, 0.0, 1.0, 0.0],
+                    flips: [if mirror { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    uv_rect: [0.0, 0.0, 1.0, 1.0],
+                })
+            }
+        };
+        if let Some(uniforms) = uniforms {
+            self.push_draw_with_track(&constants.device, &texture, uniforms, 0);
+        }
+        self.cached_draws.truncate(self.draws.len());
+        Ok(())
+    }
+
+    /// Pictures placed on a cover, each drawn on its own track so text
+    /// layers can interleave with them. A missing file is skipped rather
+    /// than failing the whole card.
+    pub(super) async fn prepare_cover_layers(
+        &mut self,
+        constants: &RenderVideoConstants,
+        output: (u32, u32),
+        layers: &[(u32, String, cap_project::LayerPose, bool, Option<[f32; 4]>)],
+    ) {
+        self.draws.clear();
+        self.draw_tracks.clear();
+        let project = constants.recording_meta.project_path.clone();
+        let relatives: Vec<String> = layers.iter().map(|layer| layer.1.clone()).collect();
+        let resolved = tokio::task::spawn_blocking(move || {
+            let root = project.canonicalize().ok();
+            relatives
+                .into_iter()
+                .map(|relative| {
+                    let root = root.as_ref()?;
+                    let path = root.join(relative).canonicalize().ok()?;
+                    if !path.starts_with(root) || !path.is_file() {
+                        return None;
+                    }
+                    let version = FileVersion::read(&path);
+                    Some((path, version))
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        let keep: HashSet<PathBuf> = resolved
+            .iter()
+            .flatten()
+            .map(|(path, _)| path.clone())
+            .collect();
+        self.cache.retain(|cached, _| keep.contains(cached));
+        for ((track, _, pose, mirror, crop), resolved) in layers.iter().zip(resolved) {
+            let Some((path, version)) = resolved else {
+                tracing::warn!("Cover layer image is missing or outside the project");
+                continue;
+            };
+            let Some(texture) = self
+                .ensure_texture(&constants.device, &constants.queue, &path, &version, None)
+                .await
+            else {
+                continue;
+            };
+            if let Some(mut uniforms) = posed_uniforms(pose, output, *mirror) {
+                if let Some(crop) = crop {
+                    uniforms.uv_rect = *crop;
+                }
+                self.push_draw_with_track(&constants.device, &texture, uniforms, *track);
+            }
+        }
+        self.cached_draws.truncate(self.draws.len());
+    }
+
+    async fn project_texture(
+        &mut self,
+        constants: &RenderVideoConstants,
+        relative: &str,
+    ) -> Result<wgpu::Texture, crate::RenderingError> {
+        let project = constants.recording_meta.project_path.clone();
+        let relative = relative.to_owned();
+        let (path, version) = tokio::task::spawn_blocking(move || {
+            let root = project.canonicalize().ok()?;
+            let path = root.join(relative).canonicalize().ok()?;
+            if !path.starts_with(&root) || !path.is_file() {
+                return None;
+            }
+            let version = FileVersion::read(&path);
+            Some((path, version))
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            crate::RenderingError::ImageLoadError(
+                "Title card image is missing or outside the project".into(),
+            )
+        })?;
+        self.cache.retain(|cached, _| cached == &path);
+        self.ensure_texture(&constants.device, &constants.queue, &path, &version, None)
+            .await
+            .ok_or_else(|| {
+                crate::RenderingError::ImageLoadError(
+                    "Title card image could not be decoded".into(),
+                )
+            })
     }
 
     pub(super) async fn prepare_title_card_picture(

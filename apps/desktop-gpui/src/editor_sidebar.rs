@@ -250,7 +250,7 @@ const UNPLACED_NOTCH: NotchConfiguration = NotchConfiguration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarTab {
     Background,
-    Camera,
+    Cover,
     Audio,
     Cursor,
     Captions,
@@ -261,7 +261,7 @@ impl SidebarTab {
     pub const ALL: [SidebarTab; 5] = [
         Self::Captions,
         Self::Background,
-        Self::Camera,
+        Self::Cover,
         Self::Audio,
         Self::Assistant,
     ];
@@ -271,7 +271,7 @@ impl SidebarTab {
             // Background, padding, corners and the cursor: the look of the
             // frame, not an image.
             Self::Background => "icons/app-window.svg",
-            Self::Camera => "icons/camera.svg",
+            Self::Cover => "icons/cover.svg",
             Self::Audio => "icons/audio-on.svg",
             Self::Cursor => "icons/cursor.svg",
             Self::Captions => "icons/captions.svg",
@@ -282,7 +282,7 @@ impl SidebarTab {
     pub fn title(self) -> &'static str {
         match self {
             Self::Background => tr::editor::sidebar::tab::background(),
-            Self::Camera => tr::editor::sidebar::tab::camera(),
+            Self::Cover => tr::editor::cover_templates::workspace(),
             Self::Audio => tr::editor::sidebar::tab::audio(),
             Self::Cursor => tr::editor::sidebar::tab::cursor(),
             Self::Captions => tr::editor::sidebar::tab::captions(),
@@ -296,11 +296,27 @@ impl SidebarTab {
     pub fn label(self) -> &'static str {
         match self {
             Self::Background => "Background",
-            Self::Camera => "Camera",
+            Self::Cover => "Cover",
             Self::Audio => "Audio",
             Self::Cursor => "Cursor",
             Self::Captions => "Captions",
             Self::Assistant => "Assistant",
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum FrameTab {
+    #[default]
+    Background,
+    Camera,
+}
+
+impl FrameTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Background => tr::editor::sidebar::tab::frame_background(),
+            Self::Camera => tr::editor::sidebar::tab::camera(),
         }
     }
 }
@@ -755,6 +771,9 @@ pub enum ColorTarget {
     TextColor(usize),
     TextBackground(usize),
     TitleCardBackground(usize),
+    CoverText(usize, usize),
+    CoverStroke(usize, usize),
+    CoverBackground(usize, usize),
     /// The outline colour, only reachable while `stroke_width > 0`.
     TextStroke(usize),
     /// The right-hand stop of the horizontal gradient, only reachable while
@@ -803,6 +822,7 @@ pub struct SidebarState {
     animated_gradient: animated_gradient::AnimatedGradientState,
     /// `state.selectedTab` (`:563-573`).
     pub tab: SidebarTab,
+    frame_tab: FrameTab,
     pub caption_tab: crate::editor_workbench::CaptionTab,
     pub caption_page: usize,
     pub(crate) caption_reveal: Option<usize>,
@@ -930,6 +950,7 @@ impl SidebarState {
             image_asset_status: None,
             animated_gradient: animated_gradient::AnimatedGradientState::new(),
             tab: SidebarTab::Captions,
+            frame_tab: FrameTab::default(),
             caption_tab: crate::editor_workbench::CaptionTab::Content,
             caption_page: 0,
             caption_reveal: None,
@@ -1100,9 +1121,19 @@ impl EditorWindow {
         let Some(tab) = SidebarTab::ALL.get(index).copied() else {
             return;
         };
+        if tab == SidebarTab::Cover {
+            if self.project_ready()
+                && !self.voiceover.is_busy()
+                && !self.title_card_workspace_open()
+            {
+                self.open_title_card_workspace(window, cx);
+            }
+            return;
+        }
         if self.sidebar_selection().is_some() {
             self.set_selection(None, cx);
         }
+        self.sidebar.title_cards.empty_role = None;
         self.dismiss_sidebar_panels(cx);
         self.sidebar.tab = tab;
         if tab == SidebarTab::Assistant {
@@ -1114,6 +1145,11 @@ impl EditorWindow {
         self.assistant.skill_menu = false;
         self.focus_root(window, cx);
         self.sidebar.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        if tab == SidebarTab::Captions
+            && let Some(index) = self.caption_index_at(self.playhead_time())
+        {
+            self.sidebar.caption_page = index / crate::editor_workbench::CAPTIONS_PER_PAGE;
+        }
         cx.notify();
         window.refresh();
     }
@@ -1784,7 +1820,14 @@ impl EditorWindow {
             picker.sat = sat;
             picker.val = val;
         }
-        if !self.sidebar.color_paused {
+        if !self.sidebar.color_paused
+            && !matches!(
+                target,
+                ColorTarget::CoverText(..)
+                    | ColorTarget::CoverStroke(..)
+                    | ColorTarget::CoverBackground(..)
+            )
+        {
             self.history.pause();
             self.sidebar.color_paused = true;
         }
@@ -1925,6 +1968,18 @@ impl EditorWindow {
                     cap_project::TitleCardBackground::Solid { color } => Some(color.clone()),
                     cap_project::TitleCardBackground::ProjectImage { .. } => None,
                 }),
+            ColorTarget::CoverText(index, layer) => self
+                .cover_appearance(index, layer)
+                .and_then(|item| item.kind.text_style())
+                .map(|style| style.color),
+            ColorTarget::CoverStroke(index, layer) => self
+                .cover_appearance(index, layer)
+                .and_then(|item| item.kind.text_style())
+                .map(|style| style.stroke.unwrap_or("#111111".into())),
+            ColorTarget::CoverBackground(index, layer) => self
+                .cover_appearance(index, layer)
+                .and_then(|item| item.kind.text_style())
+                .and_then(|style| style.band),
             ColorTarget::TextBackground(index) => self
                 .project
                 .timeline
@@ -2106,6 +2161,20 @@ impl EditorWindow {
                 self.update_title_card(index, window, cx, move |segment| {
                     segment.title_card.as_mut().unwrap().background =
                         cap_project::TitleCardBackground::Solid { color: hex };
+                });
+            }
+            ColorTarget::CoverText(index, layer)
+            | ColorTarget::CoverStroke(index, layer)
+            | ColorTarget::CoverBackground(index, layer) => {
+                self.edit_cover_appearance(index, layer, cx, move |item, style| match target {
+                    ColorTarget::CoverText(..) => style.color = hex,
+                    ColorTarget::CoverBackground(..) => style.band = Some(hex),
+                    _ => {
+                        style.stroke = Some(hex);
+                        if item.stroke_width == Some(0.) {
+                            item.stroke_width = None;
+                        }
+                    }
                 });
             }
             ColorTarget::TextBackground(index) => {
@@ -2787,14 +2856,18 @@ impl EditorWindow {
         let summary = self.summary();
         let selection = self.sidebar_selection().cloned();
         let selected_tab = self.sidebar.tab;
-
-        // The two data-driven disabled states (`:602-604`, `:610`).
+        let cover_open = self.title_card_workspace_open();
+        let empty_title_card = self.sidebar.title_cards.empty_role.filter(|_| cover_open);
+        let frame_open = selected_tab == SidebarTab::Background
+            && !cover_open
+            && selection.is_none()
+            && self.sidebar.style_target.is_none()
+            && self.audio_picker.is_none();
         let items = SidebarTab::ALL
             .into_iter()
             .map(|tab| {
                 let disabled = match tab {
-                    SidebarTab::Camera => !summary
-                        .is_some_and(|summary| summary.has_camera || summary.display_is_camera),
+                    SidebarTab::Cover => self.voiceover.is_busy(),
                     SidebarTab::Cursor => !summary.is_some_and(|summary| summary.has_cursor_data),
                     _ => false,
                 };
@@ -2810,8 +2883,16 @@ impl EditorWindow {
                 ui::TabRailItem::new(
                     tab.icon(),
                     tab.title(),
-                    (tab == SidebarTab::Assistant && self.assistant.open)
-                        || (selection.is_none() && !picking_audio && tab == selected_tab),
+                    match tab {
+                        SidebarTab::Cover => cover_open,
+                        SidebarTab::Assistant => self.assistant.open,
+                        _ => {
+                            selection.is_none()
+                                && !cover_open
+                                && !picking_audio
+                                && tab == selected_tab
+                        }
+                    },
                     disabled,
                 )
                 .context(context)
@@ -2845,8 +2926,10 @@ impl EditorWindow {
                     .border_color(self.card_line())
                     .shadow(theme.editor.card_shadow())
                     .child(rail)
+                    .children(frame_open.then(|| self.render_frame_navigation(cx)))
                     .children(
-                        (selected_tab != SidebarTab::Assistant
+                        (empty_title_card.is_none()
+                            && selected_tab != SidebarTab::Assistant
                             && (selected_tab == SidebarTab::Captions && selection.is_none()
                                 || selection
                                     .as_ref()
@@ -2854,7 +2937,8 @@ impl EditorWindow {
                         .then(|| self.render_caption_navigation(cx)),
                     )
                     .children(
-                        (selected_tab != SidebarTab::Assistant
+                        (empty_title_card.is_none()
+                            && selected_tab != SidebarTab::Assistant
                             && self.audio_picker.is_none()
                             && (selected_tab == SidebarTab::Audio && selection.is_none()
                                 || selection
@@ -2874,7 +2958,9 @@ impl EditorWindow {
                             .p(px(12.))
                             .child(tr::editor::sidebar::importing_image())
                     }))
-                    .child(if selected_tab == SidebarTab::Assistant {
+                    .child(if let Some(role) = empty_title_card {
+                        self.render_empty_title_card(role, cx)
+                    } else if selected_tab == SidebarTab::Assistant {
                         self.render_assistant(cx)
                             .unwrap_or_else(|| div().into_any_element())
                     } else if let Some((index, group)) = self.sidebar.style_target {
@@ -2901,11 +2987,58 @@ impl EditorWindow {
             )
     }
 
+    pub(crate) fn camera_controls_visible(&self) -> bool {
+        self.sidebar.tab == SidebarTab::Background
+            && self.frame_tab() == FrameTab::Camera
+            && !self.title_card_workspace_open()
+    }
+
+    fn frame_tab(&self) -> FrameTab {
+        match self.sidebar.style_target {
+            Some((_, StyleGroup::Background)) => FrameTab::Background,
+            Some((_, StyleGroup::Camera)) => FrameTab::Camera,
+            _ => self.sidebar.frame_tab,
+        }
+    }
+
+    fn render_frame_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = [FrameTab::Background, FrameTab::Camera];
+        let current = self.sidebar.frame_tab;
+        div()
+            .flex_none()
+            .px(px(16.))
+            .pt(px(12.))
+            .child(
+                ui::SegmentedControl::editor(
+                    &self.theme,
+                    "frame-settings-tab",
+                    tabs.into_iter()
+                        .map(|tab| ui::SegmentOption::new(tab.label(), tab == current))
+                        .collect(),
+                )
+                .stretch()
+                .on_select(cx.listener(move |this, index: &usize, window, cx| {
+                    let next = tabs[*index];
+                    if this.sidebar.frame_tab != next {
+                        this.dismiss_sidebar_panels(cx);
+                        this.sidebar.frame_tab = next;
+                        this.sidebar.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                        this.focus_root(window, cx);
+                        cx.notify();
+                    }
+                })),
+            )
+            .into_any_element()
+    }
+
     /// The scroll region (`:679-692`): `custom-scroll overflow-x-hidden
     /// overflow-y-scroll text-[0.875rem] flex-1 min-h-0`, with the tab panel's
     /// own `flex flex-col gap-6 p-4` inside it.
     fn render_tab_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let content: AnyElement = match self.sidebar.tab {
+            SidebarTab::Background if self.frame_tab() == FrameTab::Camera => {
+                self.render_camera_tab(cx)
+            }
             SidebarTab::Background => {
                 let cursor = self.sidebar.style_target.is_none()
                     && self
@@ -2925,7 +3058,13 @@ impl EditorWindow {
                     }))
                     .into_any_element()
             }
-            SidebarTab::Camera => self.render_camera_tab(cx),
+            SidebarTab::Cover => self.render_empty_title_card(
+                self.sidebar
+                    .title_cards
+                    .last_role
+                    .unwrap_or(cap_project::TitleCardRole::Intro),
+                cx,
+            ),
             SidebarTab::Audio => self.render_audio_tab(cx),
             SidebarTab::Cursor => self.render_cursor_tab(cx),
             SidebarTab::Captions => self.render_captions_tab(cx),
@@ -4544,9 +4683,18 @@ impl EditorWindow {
             window.refresh();
             return;
         }
+        let name_for_rail = if name.eq_ignore_ascii_case("camera") {
+            self.sidebar.frame_tab = FrameTab::Camera;
+            SidebarTab::Background.label()
+        } else {
+            if name.eq_ignore_ascii_case("background") {
+                self.sidebar.frame_tab = FrameTab::Background;
+            }
+            name
+        };
         let Some(index) = SidebarTab::ALL
             .iter()
-            .position(|tab| tab.label().eq_ignore_ascii_case(name))
+            .position(|tab| tab.label().eq_ignore_ascii_case(name_for_rail))
         else {
             tracing::warn!(name, "unknown sidebar tab");
             return;
@@ -5085,10 +5233,10 @@ impl EditorWindow {
         self.dismiss_frame_controls(cx);
         self.dismiss_sidebar_panels(cx);
         self.focus_root(window, cx);
+        self.sidebar.title_cards.empty_role = None;
         self.sidebar.style_target = Some((index, group));
         self.sidebar.tab = match group {
-            StyleGroup::Background => SidebarTab::Background,
-            StyleGroup::Camera => SidebarTab::Camera,
+            StyleGroup::Background | StyleGroup::Camera => SidebarTab::Background,
             StyleGroup::Cursor => SidebarTab::Cursor,
         };
         let ripple_enabled = self.style_control_project().cursor.ripple.enabled;

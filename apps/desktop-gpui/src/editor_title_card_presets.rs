@@ -74,10 +74,22 @@ impl Busy {
 
 enum Job {
     List,
-    Save { name: String, segment: TextSegment },
-    Rename { id: String, name: String },
-    Remove { id: String },
-    Apply { id: String, role: TitleCardRole },
+    Save {
+        name: String,
+        segment: TextSegment,
+    },
+    Rename {
+        id: String,
+        name: String,
+    },
+    Remove {
+        id: String,
+    },
+    Apply {
+        id: String,
+        role: TitleCardRole,
+        title: Option<String>,
+    },
 }
 
 enum Outcome {
@@ -125,9 +137,14 @@ impl Job {
                 store.remove(&id)?;
                 Ok(Outcome::Removed { id })
             }
-            Self::Apply { id, role } => store
-                .materialize(&id, project, role)
-                .map(|card| Outcome::Applied { card, role }),
+            Self::Apply { id, role, title } => {
+                store.materialize(&id, project, role).map(|mut card| {
+                    if let Some(title) = title {
+                        card.set_content(title);
+                    }
+                    Outcome::Applied { card, role }
+                })
+            }
         }
     }
 }
@@ -350,6 +367,39 @@ impl EditorWindow {
             }
         }));
         cx.notify();
+    }
+
+    pub(crate) fn title_card_library_open(&self) -> bool {
+        self.sidebar.title_cards.library.open
+    }
+
+    pub(crate) fn toggle_my_templates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_title_card_library(window, cx);
+    }
+
+    /// Opens the naming form that saves this card as one of my templates.
+    pub(crate) fn save_title_card_template(
+        &mut self,
+        role: TitleCardRole,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.end_field_edit(cx);
+        let Some(segment) = self.project.title_card(role) else {
+            return;
+        };
+        let Some(card) = segment.title_card.as_ref() else {
+            return;
+        };
+        let action = NameAction::Save {
+            role,
+            card_id: card.id.clone(),
+        };
+        let name = suggested_name(&segment.content);
+        if !self.sidebar.title_cards.library.loaded {
+            self.run_title_card_library_job(Job::List, window, cx);
+        }
+        self.begin_title_card_library_name(action, name, window, cx);
     }
 
     fn toggle_title_card_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -729,10 +779,15 @@ impl EditorWindow {
                             .full_width()
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
+                                    let title = this
+                                        .project
+                                        .title_card(role)
+                                        .map(|segment| segment.content.clone());
                                     this.run_title_card_library_job(
                                         Job::Apply {
                                             id: id.clone(),
                                             role,
+                                            title,
                                         },
                                         window,
                                         cx,

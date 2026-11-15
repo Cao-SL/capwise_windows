@@ -662,6 +662,7 @@ pub(crate) fn install_and_relaunch(cx: &mut App) {
         },
         cx,
     );
+    let failed_package = package.clone();
     cx.spawn(async move |cx| {
         let applied = cx
             .background_executor()
@@ -675,6 +676,10 @@ pub(crate) fn install_and_relaunch(cx: &mut App) {
             }
             Err(error) => {
                 tracing::error!(%version, "update install failed: {error}");
+                #[cfg(target_os = "macos")]
+                installer::discard_patched_update(&failed_package);
+                #[cfg(not(target_os = "macos"))]
+                drop(failed_package);
                 cx.global_mut::<UpdateScheduler>().staged = None;
                 update_failed(&tr::dialog::update::install_failed(&version, error), cx);
             }

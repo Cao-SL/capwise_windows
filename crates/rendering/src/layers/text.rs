@@ -483,6 +483,18 @@ impl TextLayer {
         self.prepare_with_mode(device, queue, output_size, texts, false, true);
     }
 
+    /// Exact bounds, one draw per text so each can be rendered on its own
+    /// track.
+    pub(super) fn prepare_exact_segmented(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        output_size: (u32, u32),
+        texts: &[PreparedText],
+    ) {
+        self.prepare_with_mode(device, queue, output_size, texts, true, true);
+    }
+
     pub(super) fn measure_exact(&mut self, text: &PreparedText) -> (f32, f32) {
         let metrics = Metrics::new(text.font_size, text.font_size * text.line_height);
         let attrs = text_attrs(&self.font_system, text);

@@ -2745,7 +2745,7 @@ pub fn clip_trim_end(
 // Auto zoom
 // ---------------------------------------------------------------------------
 
-pub const DEFAULT_AUTO_ZOOM_AMOUNT: f64 = 1.5;
+pub const DEFAULT_AUTO_ZOOM_AMOUNT: f64 = 1.35;
 
 #[derive(Default)]
 pub(crate) struct AutoZoomClip {
@@ -2876,6 +2876,7 @@ pub(crate) fn generate_zoom_segments(
     const LEAD: f64 = 0.3;
     const HOLD: f64 = 2.5;
     const WIDE_GAP: f64 = 0.7;
+    const MIN_HOLD: f64 = 1.0;
     let Some(timeline) = &project.timeline else {
         return Vec::new();
     };
@@ -2978,7 +2979,7 @@ pub(crate) fn generate_zoom_segments(
                 .map_or(duration - 0.8, |next| next.first.time - LEAD - WIDE_GAP)
                 .min(group.last_time + HOLD)
                 .min(duration - 0.8);
-            (end >= group.first.time + 0.1 && end > start).then(|| ZoomSegment {
+            (end >= group.first.time + 0.1 && end - start >= MIN_HOLD).then(|| ZoomSegment {
                 start,
                 end: round(end),
                 amount: group.amount(zoom_amount),
@@ -4454,8 +4455,23 @@ mod tests {
         }];
         let zooms = generate_zoom_segments(&clips, &project, DEFAULT_AUTO_ZOOM_AMOUNT);
         assert_eq!(zooms.len(), 2);
-        assert_eq!(zooms[0].amount, 1.5);
+        assert_eq!(zooms[0].amount, DEFAULT_AUTO_ZOOM_AMOUNT);
         assert_eq!((zooms[0].end, zooms[1].start), (2.6, 3.3));
+    }
+
+    #[test]
+    fn auto_zoom_skips_a_short_pulse_between_distant_clicks() {
+        let project = two_clip_config();
+        let clips = [AutoZoomClip {
+            positions: vec![
+                (1000.0, Some(XY::new(0.1, 0.4))),
+                (2200.0, Some(XY::new(0.9, 0.4))),
+            ],
+            ..Default::default()
+        }];
+        let zooms = generate_zoom_segments(&clips, &project, DEFAULT_AUTO_ZOOM_AMOUNT);
+        assert_eq!(zooms.len(), 1);
+        assert_eq!(zooms[0].start, 1.9);
     }
 
     #[test]

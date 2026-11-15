@@ -271,7 +271,7 @@ impl EditorWindow {
         let row = editor.matches[search.current].row;
         editor.list.scroll_to_reveal_item(row);
         if let Some(time) = editor.rows[row].output_time {
-            self.seek_to_time(time, cx);
+            self.seek_to_caption_time(time, cx);
         }
     }
 
@@ -311,7 +311,7 @@ impl EditorWindow {
         }
         if !updated.is_empty() {
             let replacement_for_edit = replacement.clone();
-            self.edit_project_global("caption-editor-replace", window, cx, move |project| {
+            self.edit_caption_content("caption-editor-replace", window, cx, move |project| {
                 let Some(captions) = project.captions.as_mut() else {
                     return false;
                 };
@@ -394,7 +394,7 @@ impl EditorWindow {
         if !self.transcript.open || !self.transcript.caption_only {
             return;
         }
-        self.edit_project_global("caption-editor-text", window, cx, move |project| {
+        self.edit_caption_content("caption-editor-text", window, cx, move |project| {
             edit_caption_text(project, id, text, selected)
         });
     }
@@ -573,7 +573,7 @@ fn caption_row(
             .disabled(time.is_none())
             .on_click(move |_, _, cx| {
                 if let Some(time) = time {
-                    let _ = seek_editor.update(cx, |this, cx| this.seek_to_time(time, cx));
+                    let _ = seek_editor.update(cx, |this, cx| this.seek_to_caption_time(time, cx));
                 }
             }),
         )

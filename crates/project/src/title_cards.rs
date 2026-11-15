@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 
 use crate::{
-    ProjectConfiguration, TextAlign, TextAnimation, TextBackgroundStyle, TextLayout, TextSegment,
-    TimelineConfiguration, XY,
+    LayerPose, ProjectConfiguration, TextAlign, TextAnimation, TextBackgroundStyle, TextLayout,
+    TextSegment, TimelineConfiguration, XY,
 };
 
 pub const TITLE_CARD_TEMPLATE_VERSION: u32 = 1;
@@ -61,6 +61,270 @@ impl Default for TitleCardBackground {
     }
 }
 
+/// Which side of the card a subject cutout (a person, usually) stands on;
+/// the title takes the other side.
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TitleCardSubjectSide {
+    Left,
+    #[default]
+    Right,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TitleCardSubject {
+    pub path: String,
+    #[serde(default)]
+    pub side: TitleCardSubjectSide,
+    #[serde(default)]
+    pub mirror: bool,
+    /// Where the person was dragged to. Without it they stand on the bottom
+    /// edge of their side; the title keeps the other side either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pose: Option<LayerPose>,
+}
+
+pub const MAX_COVER_LAYERS: usize = 32;
+
+/// Something placed on top of a cover: a line of text, a person, a sticker
+/// or a picture. Layers sit over whatever the cover shows -- a template, a
+/// generated background or a finished cover image -- in list order.
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverLayer {
+    pub id: String,
+    /// Centre and size normalised to the card; text fills its box.
+    pub pose: LayerPose,
+    pub kind: CoverLayerKind,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_crop: Option<[f32; 4]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band_opacity: Option<f32>,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum CoverLayerKind {
+    /// The card's title: its words are the segment's own content, so the
+    /// title stays one thing that generation and naming read.
+    Title {
+        #[serde(default = "white")]
+        color: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stroke: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        band: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font: Option<String>,
+    },
+    Text {
+        content: String,
+        #[serde(default = "white")]
+        color: String,
+        /// A thick outline in this colour keeps the words readable on any
+        /// picture.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stroke: Option<String>,
+        /// A filled band behind the words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        band: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        font: Option<String>,
+    },
+    Image {
+        path: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mirror: bool,
+        /// Set when the picture is a persona's pose, so its expression can
+        /// be swapped in place.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona: Option<CoverPersonaRef>,
+    },
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverPersonaRef {
+    pub persona: String,
+    pub file: String,
+}
+
+/// How a title or text layer's words look.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoverTextStyle {
+    pub color: String,
+    pub stroke: Option<String>,
+    pub band: Option<String>,
+    pub font: Option<String>,
+}
+
+impl CoverLayerKind {
+    pub fn text_style(&self) -> Option<CoverTextStyle> {
+        match self {
+            Self::Title {
+                color,
+                stroke,
+                band,
+                font,
+            }
+            | Self::Text {
+                color,
+                stroke,
+                band,
+                font,
+                ..
+            } => Some(CoverTextStyle {
+                color: color.clone(),
+                stroke: stroke.clone(),
+                band: band.clone(),
+                font: font.clone(),
+            }),
+            Self::Image { .. } => None,
+        }
+    }
+
+    pub fn set_text_style(&mut self, style: CoverTextStyle) {
+        if let Self::Title {
+            color,
+            stroke,
+            band,
+            font,
+        }
+        | Self::Text {
+            color,
+            stroke,
+            band,
+            font,
+            ..
+        } = self
+        {
+            *color = style.color;
+            *stroke = style.stroke;
+            *band = style.band;
+            *font = style.font;
+        }
+    }
+
+    pub fn is_text(&self) -> bool {
+        !matches!(self, Self::Image { .. })
+    }
+}
+
+fn white() -> String {
+    "#FFFFFF".into()
+}
+
+fn valid_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn valid_font(font: &str) -> bool {
+    !font.is_empty() && font.len() <= 64 && !font.chars().any(char::is_control)
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.chars().any(char::is_control)
+        && !name.contains(['/', '\\', ':'])
+        && name != "."
+        && name != ".."
+}
+
+fn valid_pose(pose: &LayerPose) -> bool {
+    [pose.center.x, pose.center.y, pose.size.x, pose.size.y]
+        .iter()
+        .all(|value| value.is_finite() && value.abs() <= 100.0)
+        && pose.size.x > 0.0
+        && pose.size.y > 0.0
+        && pose.rotation.is_finite()
+        && pose.opacity.is_finite()
+}
+
+impl CoverLayer {
+    pub fn new(pose: LayerPose, kind: CoverLayerKind) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            pose,
+            kind,
+            locked: false,
+            image_crop: None,
+            font_size: None,
+            stroke_width: None,
+            band_opacity: None,
+        }
+    }
+
+    fn validate(&self) -> bool {
+        let style = self.kind.text_style().is_none_or(|style| {
+            valid_color(&style.color)
+                && style.stroke.as_deref().is_none_or(valid_color)
+                && style.band.as_deref().is_none_or(valid_color)
+                && style.font.as_deref().is_none_or(valid_font)
+        });
+        valid_id(&self.id)
+            && valid_pose(&self.pose)
+            && style
+            && self
+                .font_size
+                .is_none_or(|size| (8.0..=400.0).contains(&size))
+            && self
+                .stroke_width
+                .is_none_or(|width| (0.0..=24.0).contains(&width))
+            && self.band_opacity.is_none_or(|opacity| {
+                self.kind.text_style().is_some() && (0.0..=1.0).contains(&opacity)
+            })
+            && self.image_crop.is_none_or(|[x, y, width, height]| {
+                matches!(self.kind, CoverLayerKind::Image { .. })
+                    && (0.0..=1.0).contains(&x)
+                    && (0.0..=1.0).contains(&y)
+                    && width > 0.0
+                    && height > 0.0
+                    && x + width <= 1.000_001
+                    && y + height <= 1.000_001
+            })
+            && match &self.kind {
+                CoverLayerKind::Title { .. } => true,
+                CoverLayerKind::Text { content, .. } => {
+                    content.len() <= 512 && !content.contains('\0')
+                }
+                CoverLayerKind::Image { path, persona, .. } => {
+                    valid_project_path(path)
+                        && persona.as_ref().is_none_or(|persona| {
+                            valid_name(&persona.persona) && valid_name(&persona.file)
+                        })
+                }
+            }
+    }
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_project_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1024
+        && !path.chars().any(char::is_control)
+        && !path.contains(['\\', ':'])
+        && !path
+            .split('/')
+            .any(|component| matches!(component, "" | "." | ".."))
+}
+
 fn center_focus() -> XY<f64> {
     XY::new(0.5, 0.5)
 }
@@ -86,6 +350,17 @@ pub struct TitleCard {
     pub background: TitleCardBackground,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom_text_layout: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<TitleCardSubject>,
+    /// The background is a finished cover that already carries the title
+    /// and the person, so the card draws neither its own text nor its
+    /// subject cutout.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_title: bool,
+    /// Text, people, stickers and pictures placed over the card, bottom to
+    /// top.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<CoverLayer>,
 }
 
 impl TitleCard {
@@ -99,17 +374,22 @@ impl TitleCard {
             subtitle: String::new(),
             background: TitleCardBackground::default(),
             custom_text_layout: false,
+            subject: None,
+            hide_title: false,
+            layers: Vec::new(),
         }
     }
 
+    /// The card is laid out with layers: the title is one of them, and the
+    /// old title, subtitle and label fields are not drawn.
+    pub fn has_title_layer(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|layer| matches!(layer.kind, CoverLayerKind::Title { .. }))
+    }
+
     pub fn validate(&self) -> Result<(), TitleCardError> {
-        if self.id.is_empty()
-            || self.id.len() > 128
-            || !self
-                .id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
+        if !valid_id(&self.id) {
             return Err(TitleCardError::InvalidMetadata("id"));
         }
         if self.template_version != TITLE_CARD_TEMPLATE_VERSION {
@@ -123,24 +403,14 @@ impl TitleCard {
         }
         match &self.background {
             TitleCardBackground::Solid { color } => {
-                if color.len() != 7
-                    || !color.starts_with('#')
-                    || !color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
-                {
+                if !valid_color(color) {
                     return Err(TitleCardError::InvalidMetadata("background color"));
                 }
             }
             TitleCardBackground::ProjectImage {
                 path, focus, dim, ..
             } => {
-                if path.is_empty()
-                    || path.len() > 1024
-                    || path.chars().any(char::is_control)
-                    || path.contains(['\\', ':'])
-                    || path
-                        .split('/')
-                        .any(|component| matches!(component, "" | "." | ".."))
-                {
+                if !valid_project_path(path) {
                     return Err(TitleCardError::InvalidMetadata("background path"));
                 }
                 if !focus.x.is_finite()
@@ -153,6 +423,23 @@ impl TitleCard {
                     return Err(TitleCardError::InvalidMetadata("background framing"));
                 }
             }
+        }
+        if let Some(subject) = &self.subject
+            && (!valid_project_path(&subject.path)
+                || subject.pose.as_ref().is_some_and(|pose| !valid_pose(pose)))
+        {
+            return Err(TitleCardError::InvalidMetadata("subject"));
+        }
+        if self.layers.len() > MAX_COVER_LAYERS
+            || !self.layers.iter().all(CoverLayer::validate)
+            || self
+                .layers
+                .iter()
+                .filter(|layer| matches!(layer.kind, CoverLayerKind::Title { .. }))
+                .count()
+                > 1
+        {
+            return Err(TitleCardError::InvalidMetadata("layers"));
         }
         Ok(())
     }

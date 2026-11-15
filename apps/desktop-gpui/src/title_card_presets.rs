@@ -169,6 +169,10 @@ pub(crate) struct TitleCardPreset {
     appearance: Appearance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     background_asset: Option<BackgroundAsset>,
+    /// The cover's layers; pictures are stored beside the manifest as
+    /// `layer-N.ext`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layers: Vec<cap_project::CoverLayer>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -211,6 +215,7 @@ impl TitleCardPreset {
             background: card.background.clone(),
             appearance: Appearance::from_segment(segment),
             background_asset: None,
+            layers: card.layers.clone(),
         };
         preset.validate(false)?;
         Ok(preset)
@@ -256,6 +261,9 @@ impl TitleCardPreset {
             .ok_or(PresetError::Invalid("title card"))?
             .validate()
             .map_err(|_| PresetError::Invalid("title card metadata"))?;
+        if stored && self.layer_paths().any(|path| !stored_layer_name(path)) {
+            return Err(PresetError::Invalid("layer resource path"));
+        }
         if stored
             && let TitleCardBackground::ProjectImage { path, .. } = &self.background
             && !matches!(
@@ -270,6 +278,22 @@ impl TitleCardPreset {
             return Err(PresetError::Invalid("background resource path"));
         }
         Ok(())
+    }
+
+    fn layer_paths(&self) -> impl Iterator<Item = &String> {
+        self.layers.iter().filter_map(|layer| match &layer.kind {
+            cap_project::CoverLayerKind::Image { path, .. } => Some(path),
+            _ => None,
+        })
+    }
+
+    fn layer_paths_mut(&mut self) -> impl Iterator<Item = &mut String> {
+        self.layers
+            .iter_mut()
+            .filter_map(|layer| match &mut layer.kind {
+                cap_project::CoverLayerKind::Image { path, .. } => Some(path),
+                _ => None,
+            })
     }
 
     pub(crate) fn segment(&self, role: TitleCardRole) -> Result<TextSegment, PresetError> {
@@ -296,6 +320,7 @@ impl TitleCardPreset {
         card.kicker = self.kicker.clone();
         card.subtitle = self.subtitle.clone();
         card.background = self.background.clone();
+        card.layers = self.layers.clone();
         Ok(segment)
     }
 }
@@ -403,6 +428,17 @@ impl TitleCardPresetStore {
         {
             *path = format!("background.{}", image.extension);
         }
+        let mut layer_images = Vec::new();
+        if preset.layer_paths().next().is_some() {
+            let project = checked_root(project_path, false)?
+                .ok_or(PresetError::Invalid("missing project"))?;
+            for (number, path) in preset.layer_paths_mut().enumerate() {
+                let image = read_image(&checked_descendant(&project, path, false)?)?;
+                let name = format!("layer-{number}.{}", image.extension);
+                *path = name.clone();
+                layer_images.push((name, image));
+            }
+        }
         preset.validate(true)?;
         let manifest = encoded_preset(&preset)?;
         let root =
@@ -420,6 +456,9 @@ impl TitleCardPresetStore {
                 &staging.join(format!("background.{}", image.extension)),
                 &image.bytes,
             )?;
+        }
+        for (name, image) in &layer_images {
+            write_new(&staging.join(name), &image.bytes)?;
         }
         write_new(&staging.join(MANIFEST), &manifest)?;
         fs::rename(&staging, &destination)?;
@@ -480,6 +519,7 @@ impl TitleCardPresetStore {
     ) -> Result<MaterializedTitleCard, PresetError> {
         let _lock = STORE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let (preset, image) = self.load_inner(id)?;
+        let layer_images = self.load_layers(id, &preset)?;
         let project = checked_root(target_project, false)?
             .ok_or(PresetError::Invalid("missing target project"))?;
         let mut segment = preset.segment(role)?;
@@ -548,6 +588,52 @@ impl TitleCardPresetStore {
                 *path = relative;
             }
         }
+        if !layer_images.is_empty() {
+            let content = ensure_child_directory(&project, "content", &mut asset.directories)?;
+            let images = ensure_child_directory(&content, "images", &mut asset.directories)?;
+            let mut placed = Vec::new();
+            for image in layer_images {
+                let filename = format!(
+                    "template-{}.{}",
+                    uuid::Uuid::new_v4().simple(),
+                    image.extension
+                );
+                let target = images.join(&filename);
+                let file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)?;
+                asset.files.push((target.clone(), file.metadata()?));
+                write_open(file, &image.bytes)?;
+                let relative = format!("content/images/{filename}");
+                asset_library::write_record_at(
+                    &target,
+                    &AssetRecord {
+                        path: relative.clone(),
+                        name: preset.name.clone(),
+                        kind: AssetKind::Photo,
+                        source: None,
+                        rendition: None,
+                    },
+                )
+                .map_err(PresetError::Image)?;
+                let sidecar = asset_library::record_path(&target);
+                asset
+                    .files
+                    .push((sidecar.clone(), fs::symlink_metadata(sidecar)?));
+                placed.push(relative);
+            }
+            if let Some(card) = segment.title_card.as_mut() {
+                let mut placed = placed.into_iter();
+                for layer in &mut card.layers {
+                    if let cap_project::CoverLayerKind::Image { path, .. } = &mut layer.kind
+                        && let Some(next) = placed.next()
+                    {
+                        *path = next;
+                    }
+                }
+            }
+        }
         Ok(MaterializedTitleCard { segment, asset })
     }
 
@@ -561,6 +647,19 @@ impl TitleCardPresetStore {
             checked_descendant(&directory, path, false)?;
         }
         Ok(preset)
+    }
+
+    fn load_layers(
+        &self,
+        id: &str,
+        preset: &TitleCardPreset,
+    ) -> Result<Vec<ImageResource>, PresetError> {
+        let root = checked_root(&self.root, false)?.ok_or(PresetError::Invalid("missing store"))?;
+        let directory = checked_descendant(&root, id, true)?;
+        preset
+            .layer_paths()
+            .map(|path| read_image(&checked_descendant(&directory, path, false)?))
+            .collect()
     }
 
     fn load_inner(
@@ -589,6 +688,13 @@ impl MaterializedTitleCard {
     #[cfg(test)]
     pub(crate) fn segment(&self) -> &TextSegment {
         &self.segment
+    }
+
+    /// Keeps the card's own title instead of the template's.
+    pub(crate) fn set_content(&mut self, content: String) {
+        if !content.trim().is_empty() {
+            self.segment.content = content;
+        }
     }
 
     pub(crate) fn set_track(&mut self, track: u32) {
@@ -735,6 +841,19 @@ fn checked_name(name: &str) -> Result<String, PresetError> {
         return Err(PresetError::Invalid("name"));
     }
     Ok(name.to_string())
+}
+
+fn stored_layer_name(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("layer-") else {
+        return false;
+    };
+    let Some((number, extension)) = rest.split_once('.') else {
+        return false;
+    };
+    !number.is_empty()
+        && number.len() <= 3
+        && number.bytes().all(|b| b.is_ascii_digit())
+        && matches!(extension, "png" | "jpg" | "webp" | "gif" | "bmp")
 }
 
 fn checked_id(id: &str) -> Result<(), PresetError> {
@@ -998,6 +1117,67 @@ mod tests {
                 },
             }),
         }
+    }
+
+    #[test]
+    fn title_card_presets_carry_cover_layers_and_their_pictures() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.cap");
+        let target = directory.path().join("target.cap");
+        fs::create_dir(&target).unwrap();
+        let mut segment = image_card(&source);
+        image::RgbaImage::from_pixel(2, 5, image::Rgba([200, 30, 40, 255]))
+            .save(source.join("content/images/person.png"))
+            .unwrap();
+        let pose = cap_project::LayerPose {
+            center: XY::new(0.7, 0.6),
+            size: XY::new(0.2, 0.8),
+            rotation: 0.0,
+            opacity: 1.0,
+        };
+        segment.title_card.as_mut().unwrap().layers = vec![
+            cap_project::CoverLayer::new(
+                pose,
+                cap_project::CoverLayerKind::Title {
+                    color: "#FFFFFF".into(),
+                    stroke: Some("#111111".into()),
+                    band: None,
+                    font: Some("Smiley Sans".into()),
+                },
+            ),
+            cap_project::CoverLayer::new(
+                pose,
+                cap_project::CoverLayerKind::Image {
+                    path: "content/images/person.png".into(),
+                    mirror: true,
+                    persona: None,
+                },
+            ),
+        ];
+        let store = TitleCardPresetStore::new(directory.path().join("templates"));
+        let entry = store.save("Layered", &source, &segment).unwrap();
+        let stored = serde_json::to_string(&entry.preset).unwrap();
+        assert!(stored.contains("layer-0.png") && !stored.contains("person.png"));
+        fs::remove_dir_all(&source).unwrap();
+        let pending = store
+            .materialize(&entry.id, &target, TitleCardRole::Intro)
+            .unwrap();
+        let layers = pending
+            .segment()
+            .title_card
+            .as_ref()
+            .unwrap()
+            .layers
+            .clone();
+        assert_eq!(layers.len(), 2);
+        let cap_project::CoverLayerKind::Image { path, mirror, .. } = layers[1].kind.clone() else {
+            panic!("expected picture layer");
+        };
+        assert!(mirror && target.join(&path).is_file());
+        let mut config = project();
+        pending.apply(&mut config).unwrap();
+        assert!(pending.retain_if_referenced(&config));
+        assert!(target.join(&path).is_file());
     }
 
     #[test]

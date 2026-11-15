@@ -24,6 +24,31 @@
 
 没有当前平台条目的清单会被当成"没有更新"。
 
+### 增量更新包（Mac）
+
+`release.sh` 会为最近 3 个已发布版本各生成一个 `Capwise_<旧版本>_to_<新版本>_<架构>.delta`，用同一把密钥签名，写进该平台条目的 `deltas`：
+
+```json
+"darwin-aarch64": {
+  "url": ".../Capwise_0.3.15_aarch64.app.tar.gz",
+  "signature": "...",
+  "deltas": {
+    "0.3.14": { "url": ".../Capwise_0.3.14_to_0.3.15_aarch64.delta", "signature": "..." }
+  }
+}
+```
+
+- 增量包由 `scripts/make-update-delta.py` 生成：没变的文件让 App 直接复用，变了的文件用 `zstd --patch-from` 做二进制补丁。0.3.13→0.3.14 实测 9.7 MB，整包是 256 MB。
+- App 发现有从当前版本出发的增量包时，先下载增量包，用本机的 App 重建新版本，逐个文件核对 sha256、权限和符号链接，再跑 `codesign --verify --deep --strict` 并核对签名身份，最后和整包更新走同一套替换流程。任何一步失败都会自动改下整包。
+- 老版本客户端不认识 `deltas`，会忽略它，照常下载整包。
+- 所有下载都支持断点续传：断线后从断开的地方继续，最多重试 6 次，App 重启后也能接着下载。
+- 跳过增量包：`CAPWISE_DELTA_FROM=none`；指定出发版本：`CAPWISE_DELTA_FROM="0.3.13 0.3.12"`。上传时记得把 `.delta` 和 `.delta.minisig` 一起传，脚本最后打印的 `gh release create` 命令已经带上了。
+- 本地验证增量包：
+
+  ```bash
+  CAPWISE_DELTA_OLD=<旧.app> CAPWISE_DELTA_NEW=<新.app> CAPWISE_DELTA_FILE=<.delta> CAPWISE_DELTA_VERSIONS=<旧>:<新> cargo test --bin cap-gpui real_release_delta -- --ignored
+  ```
+
 ## 一次性配置
 
 以下凭据都只存在钥匙串或本机私密目录里，**不要**写进仓库、脚本或 `.env`。

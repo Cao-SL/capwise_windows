@@ -454,6 +454,17 @@ fn cached_store(path: &Path) -> Option<Arc<Map<String, Value>>> {
 
 /// One section of the store (`general_settings`, `recording_start_safety`,
 /// ...) as raw JSON. Empty when absent or the wrong shape.
+pub fn with_store_section<R>(
+    section: &str,
+    read: impl FnOnce(Option<&Map<String, Value>>) -> R,
+) -> R {
+    let store = cached_store(&tauri_store_path());
+    read(store.as_deref().and_then(|store| match store.get(section) {
+        Some(Value::Object(map)) => Some(map),
+        _ => None,
+    }))
+}
+
 pub fn store_section(section: &str) -> Map<String, Value> {
     cached_store(&tauri_store_path())
         .and_then(|store| match store.get(section) {
@@ -478,6 +489,15 @@ pub(crate) fn store_section_checked(section: &str) -> Result<Map<String, Value>,
         Some(_) => Err(format!("Invalid settings section: {section}")),
         None => Ok(Map::new()),
     }
+}
+
+/// One string setting from one store section, for small app preferences.
+pub fn store_string(section: &str, key: &str) -> Option<String> {
+    cached_store(&tauri_store_path())?
+        .get(section)?
+        .get(key)?
+        .as_str()
+        .map(str::to_owned)
 }
 
 pub fn notification_sounds_enabled() -> bool {

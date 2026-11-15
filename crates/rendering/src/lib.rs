@@ -61,7 +61,7 @@ pub mod spring_mass_damper;
 mod takeover;
 mod text;
 mod title_cards;
-pub use title_cards::title_card_text_bounds;
+pub use title_cards::{title_card_subject_bounds, title_card_text_bounds};
 mod transition;
 #[cfg(test)]
 mod transition_render_tests;
@@ -4823,6 +4823,13 @@ impl ProjectUniforms {
             let zoom_snapped_in_window =
                 zoom_timeline.snapped_within(motion_prev_frame_time, frame_time);
 
+            let display_blur_strength = if zoom_timeline.automatic_at(f64::from(frame_time))
+                || zoom_timeline.automatic_at(f64::from(motion_prev_frame_time))
+            {
+                normalized_screen_motion * 0.45
+            } else {
+                normalized_screen_motion
+            };
             let display_motion = if zoom_snapped_in_window {
                 MotionBlurComputation::none()
             } else {
@@ -4830,7 +4837,7 @@ impl ProjectUniforms {
                     MotionBounds::new(start, end),
                     MotionBounds::new(prev_start, prev_end),
                     has_previous,
-                    normalized_screen_motion,
+                    display_blur_strength,
                     scene_blur_strength,
                     motion_frame_span,
                 )

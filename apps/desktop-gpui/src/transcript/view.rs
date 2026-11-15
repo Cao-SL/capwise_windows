@@ -826,7 +826,7 @@ impl EditorWindow {
             return;
         };
         self.transcript.user_scrolled = None;
-        self.seek_to_time(output, cx);
+        self.seek_to_caption_time(output, cx);
         self.transcript.active = edl.is_kept(word).then_some(word);
     }
 

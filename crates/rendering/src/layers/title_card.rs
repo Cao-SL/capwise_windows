@@ -1,4 +1,6 @@
-use cap_project::{TextAlign, TextBackgroundStyle, TextSegment, TitleCardBackground};
+use cap_project::{
+    CoverLayerKind, TextAlign, TextBackgroundStyle, TextSegment, TitleCardBackground,
+};
 
 use super::{ImageLayer, TextLayer, text::TextBackgroundResources};
 use crate::{
@@ -12,10 +14,15 @@ use crate::{
 pub(crate) struct TitleCardLayer {
     text: TextLayer,
     image: ImageLayer,
+    subject: ImageLayer,
+    layer_images: ImageLayer,
     background: TextBackgroundResources,
     prepared: Option<(TextSegment, (u32, u32), bool)>,
     text_box: Option<crate::TitleTextFrameBox>,
     accent: bool,
+    /// Tracks 1..=layers carry the cover layers; the card's own texts are on
+    /// track 0. Only set while there are layers.
+    layer_tracks: u32,
     visible: bool,
 }
 
@@ -24,10 +31,13 @@ impl TitleCardLayer {
         Self {
             text: TextLayer::new(device, queue),
             image: ImageLayer::new(device),
+            subject: ImageLayer::new(device),
+            layer_images: ImageLayer::new(device),
             background: TextBackgroundResources::new(device),
             prepared: None,
             text_box: None,
             accent: false,
+            layer_tracks: 0,
             visible: false,
         }
     }
@@ -59,7 +69,7 @@ impl TitleCardLayer {
             .ok_or_else(|| RenderingError::TitleCard("Missing card design".into()))?;
         card.validate()
             .map_err(|error| RenderingError::TitleCard(error.to_string()))?;
-        if segment.content.trim().is_empty() {
+        if !card.hide_title && card.layers.is_empty() && segment.content.trim().is_empty() {
             return Err(RenderingError::TitleCard(
                 "Enter a title before exporting the card".into(),
             ));
@@ -91,6 +101,50 @@ impl TitleCardLayer {
             self.image.clear_title_card_picture();
         }
 
+        // A finished cover already shows the person; drawing the cutout too
+        // would put them on it twice.
+        match (
+            card.subject.as_ref().filter(|_| !card.hide_title),
+            layout.subject,
+        ) {
+            (Some(subject), Some((region, side))) => {
+                self.subject
+                    .prepare_title_card_subject(
+                        constants,
+                        &subject.path,
+                        region,
+                        side,
+                        subject.mirror,
+                        subject.pose.map(|pose| (pose, output)),
+                    )
+                    .await?;
+            }
+            _ => self.subject.clear_title_card_picture(),
+        }
+
+        let pictures: Vec<_> = card
+            .layers
+            .iter()
+            .enumerate()
+            .filter_map(|(z, layer)| match &layer.kind {
+                CoverLayerKind::Image { path, mirror, .. } => Some((
+                    z as u32 + 1,
+                    path.clone(),
+                    layer.pose,
+                    *mirror,
+                    layer.image_crop,
+                )),
+                _ => None,
+            })
+            .collect();
+        if pictures.is_empty() {
+            self.layer_images.clear_title_card_picture();
+        } else {
+            self.layer_images
+                .prepare_cover_layers(constants, output, &pictures)
+                .await;
+        }
+
         if self
             .prepared
             .as_ref()
@@ -98,27 +152,56 @@ impl TitleCardLayer {
                 previous != segment || *size != output || *was_editing != editing
             })
         {
-            let mut texts = self.prepare_texts(segment, &layout)?;
-            let title = &mut texts[usize::from(!card.kicker.trim().is_empty())];
-            self.text_box = Some(crate::TitleTextFrameBox {
-                segment_index: index,
-                bounds: title.bounds,
-                font_size: title.font_size,
-                line_height: title.line_height,
-                align: title.align,
-            });
-            if editing {
-                title.opacity = 0.0;
+            let layered_title = card.has_title_layer();
+            let mut texts = if card.hide_title || layered_title {
+                Vec::new()
+            } else {
+                self.prepare_texts(segment, &layout)?
+            };
+            let layered = !card.layers.is_empty();
+            if layered {
+                for text in &mut texts {
+                    text.track = 0;
+                }
             }
-            self.text
-                .prepare_exact(&constants.device, &constants.queue, output, &texts);
+            self.text_box = None;
+            if let Some(title) = texts.get_mut(usize::from(!card.kicker.trim().is_empty())) {
+                self.text_box = Some(crate::TitleTextFrameBox {
+                    segment_index: index,
+                    bounds: title.bounds,
+                    font_size: title.font_size,
+                    line_height: title.line_height,
+                    align: title.align,
+                });
+                if editing {
+                    title.opacity = 0.0;
+                }
+            }
+            if layered {
+                for (z, layer) in card.layers.iter().enumerate() {
+                    if let Some(text) = self.cover_text(segment, layer, z as u32 + 1, output) {
+                        texts.push(text);
+                    }
+                }
+                self.text.prepare_exact_segmented(
+                    &constants.device,
+                    &constants.queue,
+                    output,
+                    &texts,
+                );
+            } else {
+                self.text
+                    .prepare_exact(&constants.device, &constants.queue, output, &texts);
+            }
+            self.layer_tracks = card.layers.len() as u32;
             let color = match &card.background {
                 TitleCardBackground::Solid { color } => parse_color(color),
                 TitleCardBackground::ProjectImage { .. } => parse_color("#111827"),
             };
             let mut rectangles = vec![([0.0, 0.0, output.0 as f32, output.1 as f32], color)];
-            self.accent = layout.accent.is_some();
-            if let Some(bounds) = layout.accent {
+            let accent = layout.accent.filter(|_| !card.hide_title && !layered_title);
+            self.accent = accent.is_some();
+            if let Some(bounds) = accent {
                 let mut color = parse_color(&segment.color);
                 color[3] = if layout.secondary.is_some() {
                     0.22
@@ -264,6 +347,102 @@ impl TitleCardLayer {
         Ok(blocks)
     }
 
+    /// A text layer fills its box: the words are as large as the box is
+    /// tall, smaller only when a line would not fit its width.
+    fn cover_text(
+        &mut self,
+        segment: &TextSegment,
+        layer: &cap_project::CoverLayer,
+        track: u32,
+        output: (u32, u32),
+    ) -> Option<PreparedText> {
+        let content = match &layer.kind {
+            CoverLayerKind::Title { .. } => segment.content.as_str(),
+            CoverLayerKind::Text { content, .. } => content.as_str(),
+            CoverLayerKind::Image { .. } => return None,
+        };
+        let style = layer.kind.text_style()?;
+        let (color, stroke, band) = (&style.color, &style.stroke, &style.band);
+        let content = content.trim();
+        if content.is_empty() {
+            return None;
+        }
+        let pose = &layer.pose;
+        let (width, height) = (
+            (pose.size.x * f64::from(output.0)) as f32,
+            (pose.size.y * f64::from(output.1)) as f32,
+        );
+        let (center_x, center_y) = (
+            (pose.center.x * f64::from(output.0)) as f32,
+            (pose.center.y * f64::from(output.1)) as f32,
+        );
+        if ![width, height, center_x, center_y]
+            .iter()
+            .all(|value| value.is_finite())
+            || width <= 1.0
+            || height <= 1.0
+        {
+            return None;
+        }
+        let bounds = [
+            center_x - width * 0.5,
+            center_y - height * 0.5,
+            center_x + width * 0.5,
+            center_y + height * 0.5,
+        ];
+        let lines = content.lines().count().max(1) as f32;
+        let line_height = 1.15;
+        let mut text = PreparedText {
+            track,
+            content: content.to_owned(),
+            bounds,
+            color: parse_color(color),
+            background_color: band.as_deref().map(|band| {
+                let mut color = parse_color(band);
+                color[3] *= layer.band_opacity.unwrap_or(1.0);
+                color
+            }),
+            font_family: style.font.clone().unwrap_or_else(|| "Noto Sans SC".into()),
+            font_size: layer
+                .font_size
+                .map_or(height / (lines * line_height), |size| {
+                    size * output.1 as f32 / 1080.0
+                })
+                .clamp(4.0, 2000.0),
+            font_weight: 900.0,
+            italic: false,
+            opacity: pose.opacity.clamp(0.0, 1.0),
+            align: TextAlign::Center,
+            letter_spacing: 0.0,
+            line_height,
+            shadow: 0.0,
+            offset: [0.0; 2],
+            scale: 1.0,
+            stroke: None,
+            glow: 0.0,
+            gradient_color: None,
+            background_style: TextBackgroundStyle::Box,
+            wipe: 1.0,
+            stagger_in: None,
+            stagger_out: None,
+        };
+        let mut measured = self.text.measure_exact(&text);
+        while (measured.0 > width + 0.01 || measured.1 > height + 0.01) && text.font_size > 4.0 {
+            text.font_size = (text.font_size * 0.92).max(4.0);
+            measured = self.text.measure_exact(&text);
+        }
+        let stroke_width = layer.stroke_width.map_or(text.font_size * 0.09, |width| {
+            width * output.1 as f32 / 1080.0
+        });
+        text.stroke = stroke
+            .as_deref()
+            .filter(|_| stroke_width > 0.0)
+            .map(|color| (stroke_width, parse_color(color)));
+        let top = center_y - measured.1 * 0.5;
+        text.bounds = [bounds[0], top, bounds[2], top + measured.1];
+        Some(text)
+    }
+
     fn fit_text(
         &mut self,
         mut text: PreparedText,
@@ -314,10 +493,19 @@ impl TitleCardLayer {
         }
         self.background.render(pass, 0);
         self.image.render(pass);
+        self.subject.render(pass);
         if self.accent {
             self.background.render(pass, 1);
         }
-        self.text.render(pass);
+        if self.layer_tracks == 0 {
+            self.text.render(pass);
+            return;
+        }
+        self.text.render_track(pass, 0);
+        for track in 1..=self.layer_tracks {
+            self.layer_images.render_track(pass, track);
+            self.text.render_track(pass, track);
+        }
     }
 }
 

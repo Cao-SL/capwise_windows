@@ -130,7 +130,12 @@ Tauri app used, and `src/installer.rs` does the rest without Tauri:
    signature *while* it downloads (`minisign_verify::StreamVerifier`), so a
    200 MB update never sits in memory. A verified file is reused on the next
    attempt instead of being fetched again; anything that fails verification is
-   deleted.
+   deleted. A dropped connection resumes with an HTTP `Range` request instead
+   of starting over. On macOS, when `latest.json` lists a patch from the
+   running version, the updater downloads that instead (about 10 MB) and
+   `src/update_delta.rs` rebuilds the new bundle from the installed one,
+   checking every file against the signed manifest and the code signature;
+   any failure falls back to the full archive. See `docs/release.md`.
 2. **Install** checks the file's format, then: on macOS unpacks the
    `.app.tar.gz` beside the running bundle and swaps it in with two renames
    (asking for an administrator password only when the folder is not

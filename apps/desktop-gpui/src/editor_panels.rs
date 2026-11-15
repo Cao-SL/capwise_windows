@@ -2819,6 +2819,11 @@ pub enum FieldKey {
     TitleCardSubtitle(usize),
     TitleCardKicker(usize),
     TitleCardDuration(usize),
+    /// A text layer on a cover: the card's text segment and the layer.
+    CoverLayerText(usize, usize),
+    CoverTextSize(usize, usize),
+    CoverStrokeWidth(usize, usize),
+    CoverBackgroundOpacity(usize, usize),
     CaptionText(usize),
     /// Single-line names and labels.
     AudioName(usize),
@@ -3030,6 +3035,26 @@ impl EditorWindow {
                         .kicker,
                 );
             }
+            FieldKey::CoverLayerText(index, layer) => {
+                out.push_str(self.cover_layer_text(index, layer)?);
+            }
+            FieldKey::CoverTextSize(index, layer)
+            | FieldKey::CoverStrokeWidth(index, layer)
+            | FieldKey::CoverBackgroundOpacity(index, layer) => {
+                let item = self.cover_appearance(index, layer)?;
+                let value = match key {
+                    FieldKey::CoverTextSize(..) => item.font_size,
+                    FieldKey::CoverBackgroundOpacity(..) => {
+                        Some((item.band_opacity.unwrap_or(1.0) * 100.0).round())
+                    }
+                    _ => item
+                        .stroke_width
+                        .or_else(|| item.kind.text_style()?.stroke.is_none().then_some(0.0)),
+                };
+                if let Some(value) = value {
+                    let _ = write!(out, "{value}");
+                }
+            }
             FieldKey::TitleCardDuration(index) => {
                 let segment = timeline.text_segments.get(index)?;
                 let _ = write!(out, "{:.2}", segment.end - segment.start);
@@ -3124,7 +3149,13 @@ impl EditorWindow {
     fn begin_field_edit(&mut self, key: FieldKey) {
         // The crop boxes never write the project, and a bracket held open by a
         // focused box would swallow Save's single history entry.
-        if matches!(key, FieldKey::Crop(_)) {
+        if matches!(
+            key,
+            FieldKey::Crop(_)
+                | FieldKey::CoverTextSize(..)
+                | FieldKey::CoverStrokeWidth(..)
+                | FieldKey::CoverBackgroundOpacity(..)
+        ) {
             return;
         }
         if self.field_editing == Some(key) {
@@ -3251,14 +3282,46 @@ impl EditorWindow {
             | FieldKey::TitleCardDuration(index) => {
                 self.commit_title_card_field(index, key, text, final_commit, window, cx);
             }
-            FieldKey::CaptionText(index) => {
-                self.edit_caption_segment("caption-text", index, window, cx, move |segment| {
-                    if segment.text == text {
-                        return false;
+            FieldKey::CoverLayerText(index, layer) => {
+                self.commit_cover_layer_text(index, layer, text, window, cx);
+            }
+            FieldKey::CoverTextSize(index, layer)
+            | FieldKey::CoverStrokeWidth(index, layer)
+            | FieldKey::CoverBackgroundOpacity(index, layer) => {
+                let value = match text.trim() {
+                    "" => None,
+                    text => {
+                        let Some(value) = ui::parse_number(text).filter(|value| value.is_finite())
+                        else {
+                            return;
+                        };
+                        Some(value as f32)
                     }
-                    segment.text = text;
-                    true
+                };
+                self.edit_cover_appearance(index, layer, cx, move |item, style| match key {
+                    FieldKey::CoverTextSize(..) => {
+                        item.font_size = value.map(|v| v.clamp(8., 400.))
+                    }
+                    FieldKey::CoverBackgroundOpacity(..) => {
+                        item.band_opacity = value.map(|v| v.clamp(0., 100.) / 100.)
+                    }
+                    _ => {
+                        item.stroke_width = value.map(|v| v.clamp(0., 24.));
+                        if item.stroke_width.is_some_and(|v| v > 0.) && style.stroke.is_none() {
+                            style.stroke = Some("#111111".into());
+                        }
+                    }
                 });
+            }
+            FieldKey::CaptionText(index) => {
+                if self.edit_caption_text_live(index, text) {
+                    self.schedule_save(window, cx);
+                    self.invalidate_caption_views(cx);
+                }
+                if final_commit {
+                    self.queue_caption_translation_update(window, cx);
+                    self.note_project_edit("caption-text");
+                }
             }
             FieldKey::AudioName(index) => {
                 self.edit_audio_segment("audio-name", index, window, cx, move |segment| {
@@ -4039,6 +4102,17 @@ impl EditorWindow {
             return Vec::new();
         };
         match kind {
+            SidebarMenu::CoverFontFamily(index, layer) => {
+                let current = self
+                    .cover_appearance(index, layer)
+                    .and_then(|item| item.kind.text_style())
+                    .and_then(|style| style.font)
+                    .unwrap_or_else(|| "Noto Sans SC".into());
+                font_picker_options()
+                    .into_iter()
+                    .map(|(value, label)| ui::MenuItem::new(label, value == current))
+                    .collect()
+            }
             SidebarMenu::TextFontFamily(_) => {
                 let current = timeline
                     .text_segments
@@ -4085,6 +4159,14 @@ impl EditorWindow {
         cx: &mut Context<Self>,
     ) {
         match kind {
+            SidebarMenu::CoverFontFamily(card, layer) => {
+                let Some((family, _)) = font_picker_options().into_iter().nth(index) else {
+                    return;
+                };
+                self.edit_cover_appearance(card, layer, cx, move |_, style| {
+                    style.font = Some(family);
+                });
+            }
             SidebarMenu::TextFontFamily(_) => {
                 let options = font_picker_options();
                 let Some((family, _)) = options.get(index) else {
@@ -4433,11 +4515,9 @@ impl EditorWindow {
                         .flex_col()
                         .gap(px(16.))
                         .child(
-                            ui::SelectionHeader::plain(&theme, "panel-title-card", label)
-                                .on_done(cx.listener(|this, _, _, cx| this.set_selection(None, cx)))
-                                .on_delete(cx.listener(|this, _, window, cx| {
-                                    this.delete_selected_segments(window, cx)
-                                })),
+                            ui::SelectionHeader::plain(&theme, "panel-title-card", label).on_done(
+                                cx.listener(|this, _, _, cx| this.close_title_card_workspace(cx)),
+                            ),
                         )
                         .child(self.render_title_card_panel(indices[0], cx))
                         .into_any_element()
@@ -6429,6 +6509,18 @@ impl EditorWindow {
                 self.keyframe_slider(TrackKind::Audio, index, "volume", field, cx)
             })
             .child(self.render_keyframes(TrackKind::Audio, index, cx))
+            .child(self.slider_field(
+                tr::editor::panel::audio::fade_in(),
+                SliderKey::Panel(PanelSlider::AudioFadeIn, index),
+                "secs",
+                cx,
+            ))
+            .child(self.slider_field(
+                tr::editor::panel::audio::fade_out(),
+                SliderKey::Panel(PanelSlider::AudioFadeOut, index),
+                "secs",
+                cx,
+            ))
             .child(
                 div()
                     .flex()
@@ -6447,18 +6539,6 @@ impl EditorWindow {
                     .flex()
                     .flex_col()
                     .gap(px(14.))
-                    .child(this.slider_field(
-                        tr::editor::panel::audio::fade_in(),
-                        SliderKey::Panel(PanelSlider::AudioFadeIn, index),
-                        "secs",
-                        cx,
-                    ))
-                    .child(this.slider_field(
-                        tr::editor::panel::audio::fade_out(),
-                        SliderKey::Panel(PanelSlider::AudioFadeOut, index),
-                        "secs",
-                        cx,
-                    ))
                     .child(
                         ui::Field::stacked(&theme, tr::editor::panel::name())
                             .child(this.render_field_input(FieldKey::AudioName(index), None)),
@@ -8474,6 +8554,27 @@ impl EditorWindow {
     pub(crate) fn prepare_sidebar_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut fields: Vec<FieldKey> = Vec::new();
         let mut colors: Vec<ColorTarget> = Vec::new();
+
+        if let Some(crate::editor_canvas::CanvasSelection::CoverLayer(index, layer)) =
+            self.canvas_selection
+            && let Some(item) = self.cover_layer(index, layer)
+            && item.kind.text_style().is_some()
+        {
+            fields.push(FieldKey::CoverLayerText(index, layer));
+        }
+        if let Some(dialog) = &self.sidebar.title_cards.layers.text_dialog {
+            let (index, layer) = (dialog.card, dialog.layer);
+            fields.extend([
+                FieldKey::CoverTextSize(index, layer),
+                FieldKey::CoverStrokeWidth(index, layer),
+                FieldKey::CoverBackgroundOpacity(index, layer),
+            ]);
+            colors.extend([
+                ColorTarget::CoverText(index, layer),
+                ColorTarget::CoverStroke(index, layer),
+                ColorTarget::CoverBackground(index, layer),
+            ]);
+        }
 
         // The crop dialog's four `BoundInput`s, while it is open. Created up
         // front because the match below bails early when the project has no

@@ -25,11 +25,13 @@ mod camera_blur_portable;
 mod camera_loading;
 mod camera_window;
 mod caption_breaks;
+mod caption_canvas;
 mod caption_replace;
 mod caption_review;
 mod caption_translation;
 mod controls_window;
 mod cover_generation;
+mod cover_templates;
 mod crash_capture;
 mod deeplink;
 mod dev_restore;
@@ -46,6 +48,8 @@ mod editor_canvas;
 mod editor_clips;
 mod editor_color;
 mod editor_cover;
+mod editor_cover_crop;
+mod editor_cover_layers;
 mod editor_crop;
 mod editor_edits;
 mod editor_export;
@@ -60,6 +64,7 @@ mod editor_sidebar;
 mod editor_tabs;
 mod editor_timeline;
 mod editor_title_card_presets;
+mod editor_title_card_subject;
 mod editor_title_cards;
 mod editor_voiceover;
 mod editor_window;
@@ -100,6 +105,8 @@ mod perf_marks;
 mod permission_guide;
 mod permissions;
 mod permissions_ui;
+mod persona_cutout;
+mod personas;
 #[cfg(test)]
 mod picker_benchmark;
 #[cfg(debug_assertions)]
@@ -164,6 +171,8 @@ mod transcript;
 mod transcription;
 mod tray;
 mod ui;
+#[cfg(target_os = "macos")]
+mod update_delta;
 mod updates;
 #[cfg(feature = "cap-cloud")]
 mod upload;

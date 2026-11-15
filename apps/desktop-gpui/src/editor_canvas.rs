@@ -50,7 +50,8 @@ use cap_rendering::{CaptionFrameBox, FrameLayout};
 use gpui::{
     AnyElement, AppContext as _, Bounds, Context, CursorStyle, FontWeight, Hsla,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
-    Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Window, div, px,
+    Pixels, Point, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    prelude::FluentBuilder, px,
 };
 
 /// `NormRect` (`snapping.ts:6`): normalised against the output frame.
@@ -529,9 +530,21 @@ pub enum CanvasSelection {
     Image(usize),
     Captions,
     Shape(usize),
+    /// A layer on a cover: the card's text segment and the layer.
+    CoverLayer(usize, usize),
+    /// The person standing beside a cover's title.
+    CoverSubject(usize),
 }
 
 impl CanvasSelection {
+    /// The cover card a cover element belongs to.
+    pub(crate) fn cover_card(self) -> Option<usize> {
+        match self {
+            Self::CoverLayer(index, _) | Self::CoverSubject(index) => Some(index),
+            _ => None,
+        }
+    }
+
     fn label(self) -> SharedString {
         match self {
             Self::Display => tr::editor::canvas::screen().into(),
@@ -541,6 +554,8 @@ impl CanvasSelection {
             Self::Image(_) => tr::editor::canvas::image().into(),
             Self::Captions => tr::editor::canvas::captions().into(),
             Self::Shape(_) => tr::editor::canvas::shape().into(),
+            Self::CoverLayer(..) => tr::editor::canvas::cover_layer().into(),
+            Self::CoverSubject(_) => tr::editor::canvas::person().into(),
         }
     }
 
@@ -553,6 +568,8 @@ impl CanvasSelection {
             Self::Image(index) => format!("canvas-image-{index}").into(),
             Self::Captions => "canvas-captions".into(),
             Self::Shape(index) => format!("canvas-shape-{index}").into(),
+            Self::CoverLayer(index, layer) => format!("canvas-cover-{index}-{layer}").into(),
+            Self::CoverSubject(index) => format!("canvas-cover-subject-{index}").into(),
         }
     }
 
@@ -592,9 +609,11 @@ pub struct CanvasDrag {
 
 pub(crate) struct CanvasTextEdit {
     pub(crate) index: usize,
+    /// A cover's text layer being typed into, rather than the segment.
+    pub(crate) layer: Option<usize>,
     pub(crate) before: String,
-    input: gpui::Entity<crate::ui::TextInputState>,
-    _subscription: gpui::Subscription,
+    pub(crate) input: gpui::Entity<crate::ui::TextInputState>,
+    pub(crate) _subscription: gpui::Subscription,
 }
 
 impl EditorWindow {
@@ -638,14 +657,21 @@ impl EditorWindow {
         self.canvas_overlay_visible() && !self.pane_scene() && self.camera_rect().is_some()
     }
 
+    /// The caption's box on the preview. A manual caption is placed from its
+    /// stored centre so a drag never waits on a frame; a preset one is where
+    /// the renderer drew it.
     fn caption_rect(&self) -> Option<NormRect> {
         let layout = self.frame_layout.as_ref()?;
         let captions = self.project.captions.as_ref()?;
+        if !captions.settings.enabled {
+            return None;
+        }
         caption_canvas_rect(layout, captions.settings.manual_position)
+            .or_else(|| self.caption_drawn_rect())
     }
 
     fn show_captions(&self) -> bool {
-        self.canvas_overlay_visible() && self.caption_rect().is_some()
+        self.canvas_overlay_visible() && !self.caption_edit_open() && self.caption_rect().is_some()
     }
 
     /// `displayDraggable()` (`:249`): the rendered display rect is
@@ -787,7 +813,48 @@ impl EditorWindow {
             self.assistant.open = false;
             self.sidebar.tab = crate::editor_sidebar::SidebarTab::Captions;
         }
-        if let Some((kind, index)) = element.timeline_selection() {
+        if element == CanvasSelection::Captions {
+            let Some(index) = self.caption_index_at(self.preview_or_playhead()) else {
+                return;
+            };
+            self.assistant.open = false;
+            let line = self.caption_rect().and_then(|rect| {
+                let frame = self.canvas_bounds()?;
+                let y = f64::from(
+                    f32::from(event.position.y - frame.origin.y)
+                        / f32::from(frame.size.height).max(1.),
+                );
+                Some(if y > rect.y + rect.h * 0.6 {
+                    crate::caption_canvas::CaptionLine::Translation
+                } else {
+                    crate::caption_canvas::CaptionLine::Source
+                })
+            });
+            let bilingual = self.project.captions.as_ref().is_some_and(|captions| {
+                captions.settings.display_mode == cap_project::CaptionDisplayMode::Bilingual
+            });
+            let line = line.filter(|_| bilingual);
+            // A press opens the caption for typing at once. If it then moves,
+            // it becomes a drag and the untouched edit closes again.
+            self.begin_caption_edit(index, line, false, window, cx);
+            if event.click_count > 1 || self.caption_edit.is_none() {
+                return;
+            }
+            self.caption_press = true;
+            self.canvas_selection = Some(element);
+        }
+        if let Some(card) = element.cover_card() {
+            self.show_cover_on_canvas(card, cx);
+            // The card stays selected so its panel stays open.
+            self.set_selection(
+                Some(crate::editor_edits::Selection::single(
+                    TrackKind::Text,
+                    card,
+                )),
+                cx,
+            );
+            self.canvas_selection = Some(element);
+        } else if let Some((kind, index)) = element.timeline_selection() {
             self.canvas_selection = Some(element);
             self.set_selection(
                 Some(crate::editor_edits::Selection::single(kind, index)),
@@ -799,10 +866,20 @@ impl EditorWindow {
             }
             self.canvas_selection = Some(element);
         }
+        if event.click_count == 2 && self.is_cover_picture(element) {
+            self.open_cover_image_crop(element, window, cx);
+            return;
+        }
         if event.click_count == 2
             && let CanvasSelection::Text(index) = element
         {
             self.begin_canvas_text_edit(index, window, cx);
+            return;
+        }
+        if event.click_count == 2
+            && let CanvasSelection::CoverLayer(index, layer) = element
+            && self.begin_cover_text_edit(index, layer, window, cx)
+        {
             return;
         }
         let draggable = match element {
@@ -812,7 +889,9 @@ impl EditorWindow {
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
             | CanvasSelection::Captions => true,
-            CanvasSelection::Shape(_) => true,
+            CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => true,
         };
         if !draggable {
             cx.notify();
@@ -850,13 +929,25 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => true,
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => true,
             CanvasSelection::Captions => false,
         };
         if !resizable {
             return;
         }
-        if let Some((kind, index)) = element.timeline_selection() {
+        if let Some(card) = element.cover_card() {
+            self.show_cover_on_canvas(card, cx);
+            self.set_selection(
+                Some(crate::editor_edits::Selection::single(
+                    TrackKind::Text,
+                    card,
+                )),
+                cx,
+            );
+            self.canvas_selection = Some(element);
+        } else if let Some((kind, index)) = element.timeline_selection() {
             self.canvas_selection = Some(element);
             self.set_selection(
                 Some(crate::editor_edits::Selection::single(kind, index)),
@@ -922,8 +1013,18 @@ impl EditorWindow {
         );
         // `if (!state.moved && Math.hypot(...) < 2) return` (`:299-309`): a
         // plain click must not write config.
-        if !drag.moved && delta.0.hypot(delta.1) < 2. {
+        // A press on a caption is usually a click to type, and a trackpad
+        // click wobbles a few pixels, so the caption waits for a real drag.
+        let threshold = if drag.element == CanvasSelection::Captions {
+            5.
+        } else {
+            2.
+        };
+        if !drag.moved && delta.0.hypot(delta.1) < threshold {
             return;
+        }
+        if std::mem::take(&mut self.caption_press) {
+            self.cancel_caption_edit(window, cx);
         }
         self.apply_canvas_drag(delta, event.modifiers.shift, canvas, window, cx);
     }
@@ -1028,6 +1129,16 @@ impl EditorWindow {
                         cx,
                     );
                 }
+                CanvasSelection::CoverLayer(..) | CanvasSelection::CoverSubject(_) => {
+                    let rect = if self.cover_keeps_shape(element) {
+                        image_resize_rect(start, size, delta, (dir_x, dir_y), 0., true)
+                    } else {
+                        overlay_resize_rect(start, size, delta, dir_x, dir_y, &targets, shift).0
+                    };
+                    self.snap_guides.clear();
+                    self.canvas_overlay_rect = Some(rect);
+                    self.write_overlay_rect(element, rect, cx);
+                }
                 CanvasSelection::Mask(_)
                 | CanvasSelection::Text(_)
                 | CanvasSelection::Image(_)
@@ -1068,6 +1179,9 @@ impl EditorWindow {
         let (center, guides) = match element {
             CanvasSelection::Display => display_drag_center(start, size, delta, &targets, shift),
             CanvasSelection::Camera => camera_drag_center(start, size, delta, &targets, shift),
+            CanvasSelection::CoverLayer(..) | CanvasSelection::CoverSubject(_) => {
+                overlay_drag_center(start, size, delta, &targets, shift)
+            }
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
@@ -1102,7 +1216,9 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => {
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => {
                 self.canvas_overlay_rect = Some(optimistic);
                 self.write_overlay_rect(element, optimistic, cx);
             }
@@ -1128,6 +1244,7 @@ impl EditorWindow {
         self.history.resume(&config);
         self.snap_guides.clear();
         self.canvas_overlay_rect = None;
+        self.caption_press = false;
         if drag.moved {
             if !matches!(
                 drag.element,
@@ -1173,6 +1290,12 @@ impl EditorWindow {
                 ),
                 CanvasSelection::Shape(index) => {
                     tracing::info!(index, "canvas shape drag");
+                }
+                CanvasSelection::CoverLayer(index, layer) => {
+                    tracing::info!(index, layer, "canvas cover layer drag");
+                }
+                CanvasSelection::CoverSubject(index) => {
+                    tracing::info!(index, "canvas cover subject drag");
                 }
             }
         }
@@ -1227,7 +1350,9 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => overlay_nudge_center(rect, direction, shift),
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => overlay_nudge_center(rect, direction, shift),
             CanvasSelection::Captions => caption_nudge_center(rect, size, direction, shift),
         };
         let optimistic = NormRect {
@@ -1247,7 +1372,9 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => {
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => {
                 self.canvas_overlay_rect = Some(optimistic);
                 self.write_overlay_rect(selected, optimistic, cx);
             }
@@ -1303,6 +1430,7 @@ impl EditorWindow {
             return;
         }
         captions.settings.manual_position = Some(next);
+        captions.settings.position = "manual".to_string();
         self.project_changed_live(cx);
     }
 
@@ -1415,6 +1543,15 @@ impl EditorWindow {
                     .get(index)?
                     .resolved_at(self.preview_or_playhead());
                 let segment = segment.as_ref();
+                // A finished cover has its title painted in: there is no text
+                // box on the canvas to select, drag or type into.
+                if segment
+                    .title_card
+                    .as_ref()
+                    .is_some_and(|card| card.hide_title || card.has_title_layer())
+                {
+                    return None;
+                }
                 if segment.title_card.is_some() {
                     let layout = self.frame_layout.as_ref()?;
                     let bounds = cap_rendering::title_card_text_bounds(
@@ -1431,6 +1568,17 @@ impl EditorWindow {
                 })
             }
             CanvasSelection::Captions => self.caption_rect(),
+            CanvasSelection::CoverLayer(..) | CanvasSelection::CoverSubject(_) => {
+                if self
+                    .canvas_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.element == element)
+                    && let Some(rect) = self.canvas_overlay_rect
+                {
+                    return Some(rect);
+                }
+                self.cover_element_rect(element)
+            }
         }
     }
 
@@ -1449,6 +1597,12 @@ impl EditorWindow {
             y: rect.h.max(0.01),
         };
         let time = self.preview_or_playhead();
+        if element.cover_card().is_some() {
+            if self.write_cover_pose(element, center, size) {
+                self.project_changed_live(cx);
+            }
+            return;
+        }
         let Some(timeline) = self.project.timeline.as_mut() else {
             return;
         };
@@ -1567,7 +1721,8 @@ impl EditorWindow {
                 && self.shape_drag.is_none()
                 && self.shape_tool.is_none()
                 && !self.redaction_tool_active()
-                && self.canvas_text_edit.is_none())
+                && self.canvas_text_edit.is_none()
+                && !(active_card.is_some() && self.title_card_workspace_open()))
         {
             return None;
         }
@@ -1595,8 +1750,16 @@ impl EditorWindow {
                     .inset_0()
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.set_selection(None, cx);
+                        cx.listener(move |this, _, window, cx| {
+                            if this
+                                .selected_title_card()
+                                .is_some_and(|(index, _)| active_card == Some(index))
+                            {
+                                this.stop_canvas_text_edit(cx);
+                                this.end_field_edit(cx);
+                            } else {
+                                this.set_selection(None, cx);
+                            }
                             this.canvas_selection = None;
                             cx.notify();
                             window.refresh();
@@ -1684,11 +1847,9 @@ impl EditorWindow {
                             let element = CanvasSelection::Text(index);
                             if let Some(rect) = self.element_rect(element) {
                                 layer = layer.child(
-                                    if self
-                                        .canvas_text_edit
-                                        .as_ref()
-                                        .is_some_and(|edit| edit.index == index)
-                                    {
+                                    if self.canvas_text_edit.as_ref().is_some_and(|edit| {
+                                        edit.index == index && edit.layer.is_none()
+                                    }) {
                                         self.render_canvas_text_input(index, rect, (cw, ch), cx)
                                     } else {
                                         self.render_element_box(element, rect, (cw, ch), cx)
@@ -1697,6 +1858,21 @@ impl EditorWindow {
                             }
                         }
                     }
+                }
+            }
+        }
+        if let Some(card) = active_card {
+            for element in self.cover_elements(card) {
+                if let Some(rect) = self.element_rect(element) {
+                    let typing = self.canvas_text_edit.as_ref().is_some_and(|edit| {
+                        CanvasSelection::CoverLayer(edit.index, edit.layer.unwrap_or(usize::MAX))
+                            == element
+                    });
+                    layer = layer.child(if typing {
+                        self.render_cover_text_input(element, rect, (cw, ch), cx)
+                    } else {
+                        self.render_element_box(element, rect, (cw, ch), cx)
+                    });
                 }
             }
         }
@@ -1768,7 +1944,7 @@ impl EditorWindow {
                 if this
                     .canvas_text_edit
                     .as_ref()
-                    .is_none_or(|edit| edit.index != index)
+                    .is_none_or(|edit| edit.index != index || edit.layer.is_some())
                 {
                     return;
                 }
@@ -1822,6 +1998,7 @@ impl EditorWindow {
         self.history.pause();
         self.canvas_text_edit = Some(CanvasTextEdit {
             index,
+            layer: None,
             before,
             input: input.clone(),
             _subscription: subscription,
@@ -1937,7 +2114,9 @@ impl EditorWindow {
             .canvas_drag
             .as_ref()
             .is_some_and(|drag| drag.element == element);
-        let show = selected || hovered || dragging;
+        let picture = self.is_cover_picture(element);
+        let cover_locked = self.cover_element_locked(element);
+        let show = !cover_locked && (selected || hovered || dragging);
         let (draggable, resizable, locked_message) = match element {
             CanvasSelection::Display => (
                 self.display_draggable(),
@@ -1952,7 +2131,9 @@ impl EditorWindow {
             CanvasSelection::Mask(_)
             | CanvasSelection::Text(_)
             | CanvasSelection::Image(_)
-            | CanvasSelection::Shape(_) => (true, true, None),
+            | CanvasSelection::Shape(_)
+            | CanvasSelection::CoverLayer(..)
+            | CanvasSelection::CoverSubject(_) => (true, true, None),
             CanvasSelection::Captions => (true, false, None),
         };
         let has_handles = element != CanvasSelection::Captions;
@@ -1979,7 +2160,9 @@ impl EditorWindow {
             .top(px(top))
             .w(px(width))
             .h(px(height))
-            .cursor(if draggable {
+            .cursor(if element == CanvasSelection::Captions {
+                CursorStyle::IBeam
+            } else if draggable && !cover_locked {
                 CursorStyle::OpenHand
             } else {
                 CursorStyle::Arrow
@@ -1992,19 +2175,28 @@ impl EditorWindow {
                     .border_2()
                     .border_color(border),
             )
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                this.set_canvas_hover(element, *hovered, cx);
-            }))
-            // Boxes overlap -- a mask sits on the display -- and gpui runs
-            // every containing sibling's listener topmost-first, so without
-            // the stop the display would hijack the drag one event later.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.begin_canvas_move(element, event, window, cx);
-                }),
-            );
+            .when(!cover_locked, |element_box| {
+                element_box
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        this.set_canvas_hover(element, *hovered, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.begin_canvas_move(element, event, window, cx);
+                        }),
+                    )
+            })
+            .when(picture, |element_box| {
+                element_box.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_cover_layer_menu(element, event.position, cx);
+                    }),
+                )
+            });
 
         // The caption is drawn over every other element, so its box takes the
         // pointer from the boxes under it; otherwise the screen box under it
@@ -2028,7 +2220,11 @@ impl EditorWindow {
                     .text_size(px(11.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(gpui::white())
-                    .child(element.label()),
+                    .child(if element == CanvasSelection::Captions {
+                        tr::editor::canvas::caption_hint().into()
+                    } else {
+                        element.label()
+                    }),
             );
 
             if let Some(message) = locked_message {

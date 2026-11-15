@@ -1000,7 +1000,8 @@ pub struct MainWindow {
     target_poll_task: Option<gpui::Task<()>>,
     input_poll_task: Option<gpui::Task<()>>,
     input_poll_generation: u64,
-    input_enumeration_gate: devices::InputEnumerationGate,
+    camera_enumeration_gate: devices::InputEnumerationGate,
+    microphone_enumeration_gate: devices::InputEnumerationGate,
     /// `scheduleTargetListPrewarm` (`new-main/index.tsx:1897-1965`).
     prewarm_task: Option<gpui::Task<()>>,
     keyboard_nav: bool,
@@ -1250,7 +1251,8 @@ impl MainWindow {
             target_poll_task: None,
             input_poll_task: None,
             input_poll_generation: 0,
-            input_enumeration_gate: devices::InputEnumerationGate::default(),
+            camera_enumeration_gate: devices::InputEnumerationGate::default(),
+            microphone_enumeration_gate: devices::InputEnumerationGate::default(),
             prewarm_task: None,
             keyboard_nav: false,
             _keyboard_nav: keyboard_nav,
@@ -1643,7 +1645,10 @@ impl MainWindow {
 
     fn start_input_poll(&mut self, menu: DeviceMenu, window: &mut Window, cx: &mut Context<Self>) {
         let generation = self.input_poll_generation;
-        let gate = self.input_enumeration_gate.clone();
+        let gate = match menu {
+            DeviceMenu::Camera => self.camera_enumeration_gate.clone(),
+            DeviceMenu::Microphone => self.microphone_enumeration_gate.clone(),
+        };
         self.input_poll_task = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 let Ok(allowed) = this.update_in(cx, |this, window, cx| {
@@ -1675,18 +1680,36 @@ impl MainWindow {
                     return;
                 };
                 if allowed && let Some(permit) = gate.try_enter() {
-                    let snapshot = cx
-                        .background_executor()
-                        .spawn(async move {
-                            let _permit = permit;
-                            match menu {
-                                DeviceMenu::Camera => {
+                    let snapshot = match menu {
+                        DeviceMenu::Camera => {
+                            cx.background_executor()
+                                .spawn(async move {
+                                    let _permit = permit;
                                     devices::InputSnapshot::cameras(&previous_cameras)
+                                })
+                                .await
+                        }
+                        DeviceMenu::Microphone => {
+                            let Ok(task) = cx.update(|_, cx| {
+                                gpui_tokio::Tokio::spawn(cx, async move {
+                                    tokio::task::spawn_blocking(move || {
+                                        let _permit = permit;
+                                        devices::InputSnapshot::microphones()
+                                    })
+                                    .await
+                                })
+                            }) else {
+                                return;
+                            };
+                            match task.await {
+                                Ok(Ok(snapshot)) => snapshot,
+                                Ok(Err(error)) | Err(error) => {
+                                    tracing::warn!(%error, "could not refresh microphone devices");
+                                    return;
                                 }
-                                DeviceMenu::Microphone => devices::InputSnapshot::microphones(),
                             }
-                        })
-                        .await;
+                        }
+                    };
                     let Ok(current) = this.update_in(cx, |this, window, cx| {
                         let current_menu = match this.panel {
                             Some(Panel::Device(menu)) => Some(menu),
@@ -1835,54 +1858,79 @@ impl MainWindow {
         let Some(recording) = self.incomplete_recording.clone() else {
             return;
         };
-        if !recover
-            && !crate::platform::confirm_dialog(
-                "Cap",
-                tr::main::delete_recording_confirm(),
-                tr::common::yes(),
-                tr::common::no(),
-                false,
-            )
-        {
+        if !recover && window.has_active_prompt() {
             return;
         }
 
         self.recovery_pending = true;
         self.recovery_error = None;
+        let confirmation = (!recover).then(|| {
+            window.prompt(
+                gpui::PromptLevel::Warning,
+                tr::main::recovery::discard(),
+                Some(tr::main::delete_recording_confirm()),
+                &[
+                    gpui::PromptButton::ok(tr::main::recovery::discard()),
+                    gpui::PromptButton::cancel(tr::common::cancel()),
+                ],
+                cx,
+            )
+        });
         cx.notify();
         window.refresh();
 
         self.recovery_action_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = if recover {
-                cx.background_executor().spawn(async move {
-                    library::recover_incomplete_recording(&recording.project_path)
-                }).await
-            } else {
-                let path = recording.project_path;
-                let Ok(task) = cx.update(|_, cx| {
-                    gpui_tokio::Tokio::spawn(
-                        cx,
-                        crate::upload::queue::delete_recording(path.clone()),
-                    )
-                }) else {
+            if let Some(confirmation) = confirmation {
+                let accepted = confirmation.await == Ok(0);
+                let proceed = this
+                    .update_in(cx, |this, window, cx| {
+                        if accepted && this.session.read(cx).phase == Phase::Idle {
+                            return true;
+                        }
+                        this.recovery_pending = false;
+                        cx.notify();
+                        window.refresh();
+                        false
+                    })
+                    .unwrap_or(false);
+                if !proceed {
                     return;
-                };
-                task.await
-                    .unwrap_or_else(|error| Err(error.to_string()))
-                    .map(|()| path)
+                }
+            }
+
+            let path = recording.project_path;
+            let Ok(task) = cx.update(|_, cx| {
+                gpui_tokio::Tokio::spawn(cx, async move {
+                    if recover {
+                        tokio::task::spawn_blocking(move || {
+                            let path = library::recover_incomplete_recording(&path)?;
+                            let output = path.join("content/output.mp4");
+                            let output = output.is_file().then_some(output);
+                            Ok((path, output))
+                        })
+                        .await
+                        .map_err(|error| error.to_string())?
+                    } else {
+                        crate::upload::queue::delete_recording(path.clone()).await?;
+                        Ok((path, None))
+                    }
+                })
+            }) else {
+                return;
             };
+            let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
 
             this.update_in(cx, |this, window, cx| {
                 this.recovery_pending = false;
                 match result {
-                    Ok(project_path) => {
+                    Ok((project_path, output)) => {
                         this.incomplete_recording = None;
                         this.recovery_error = None;
                         this.refresh_open_library(window, cx);
                         this.scan_incomplete_recordings(window, cx, std::time::Duration::ZERO);
                         if recover {
-                            if project_path.join("content/output.mp4").is_file() {
-                                library::reveal_path(&project_path.join("content/output.mp4"), cx);
+                            if let Some(output) = output {
+                                library::reveal_path(&output, cx);
                             } else {
                                 cx.defer(move |cx| app_windows::open_editor(project_path, cx));
                             }

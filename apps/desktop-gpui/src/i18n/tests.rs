@@ -17,6 +17,8 @@ const CAPWISE_KEYS: &[&str] = &[
     "dialog.teleprompter.follow.",
     "editor.assets.",
     "editor.cover.",
+    "editor.cover_controls.",
+    "editor.cover_templates.",
     "editor.review.",
     "editor.setup.",
     "editor.title_card_library.",
@@ -50,6 +52,7 @@ pub(super) fn is_capwise_key(key: &str) -> bool {
 }
 
 const FORMATTED: &[&str] = &[
+    "editor.assistant.cover_waiting",
     "tray.version",
     "settings.general.excluded_windows.missing_body",
     "settings.general.self_host.confirm_change",
@@ -661,6 +664,9 @@ fn english_matches_the_literals_it_replaced() {
         (tr::editor::assistant::hidden(), "Hide".into()),
         (tr::editor::assistant::cover_settings(), "Edit cover".into()),
         (tr::editor::assistant::cover_working(), "Making the cover…".into()),
+        (tr::editor::assistant::cover_pick(), "Pick one for the cover".into()),
+        (tr::editor::assistant::cover_more(), "Two more".into()),
+        (tr::editor::assistant::cover_use(), "Use this cover".into()),
         (tr::editor::assistant::regenerate(), "Make another".into()),
         (tr::editor::stickers::title(), "Stickers".into()),
         (tr::editor::stickers::tooltip(), "Insert an emoji or icon".into()),

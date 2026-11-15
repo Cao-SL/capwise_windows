@@ -37,6 +37,8 @@ pub(crate) struct StickerPicker {
     drawing: bool,
     left: gpui::Pixels,
     top: gpui::Pixels,
+    /// Put the sticker on this cover instead of the timeline.
+    cover: Option<String>,
 }
 
 impl EditorWindow {
@@ -66,9 +68,22 @@ impl EditorWindow {
             drawing: false,
             left,
             top,
+            cover: None,
         });
         self.draw_sticker_thumbs(cx);
         cx.notify();
+    }
+
+    pub(crate) fn open_cover_sticker_picker(
+        &mut self,
+        card_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_sticker_picker(px(260.), px(118.), window, cx);
+        if let Some(picker) = &mut self.sticker_picker {
+            picker.cover = Some(card_id);
+        }
     }
 
     fn sticker_results(&self, cx: &gpui::App) -> Vec<&'static stickers::Sticker> {
@@ -178,6 +193,29 @@ impl EditorWindow {
         let Some(picker) = self.sticker_picker.take() else {
             return;
         };
+        if let Some(card_id) = picker.cover {
+            let (color, weight) = (picker.color, picker.weight);
+            cx.spawn_in(window, async move |this, cx| {
+                let png = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let path = stickers::write_png(sticker, color, weight)?;
+                        let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+                        Ok::<_, String>((bytes, sticker.name.clone()))
+                    })
+                    .await;
+                this.update_in(cx, |this, window, cx| match png {
+                    Ok((bytes, name)) => {
+                        this.add_cover_picture(card_id, bytes, name, (0.5, 0.5, 0.24), window, cx)
+                    }
+                    Err(error) => this.title_card_error(error, window, cx),
+                })
+                .ok();
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
         if self.asset_import_busy() {
             return;
         }

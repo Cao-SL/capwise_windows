@@ -505,7 +505,9 @@ mod tests {
         let project = ProjectConfiguration::load(dir.path()).unwrap();
         let timeline = project.timeline.as_ref().unwrap();
         assert!(!timeline.zoom_segments.is_empty());
-        assert!(timeline.zoom_segments.iter().all(|zoom| zoom.amount == 1.5));
+        assert!(timeline.zoom_segments.iter().all(|zoom| {
+            (zoom.amount - crate::editor_edits::DEFAULT_AUTO_ZOOM_AMOUNT).abs() < 1e-6
+        }));
         assert_eq!(timeline.keyboard_segments.len(), 1);
         assert_eq!(timeline.keyboard_segments[0].display_text, "⌘C");
         assert!(project.keyboard.as_ref().unwrap().settings.enabled);

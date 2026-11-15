@@ -53,7 +53,7 @@ jobs:
 
       - name: Install tools and native dependencies
         run: |
-          brew install minisign
+          brew install minisign zstd
           bun install --frozen-lockfile
           bun run cap-setup
 
@@ -89,6 +89,8 @@ jobs:
           echo "CAPWISE_UPDATER_KEY=$updater_key" >>"$GITHUB_ENV"
 
       - name: Build, sign and notarize
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           notes="$RUNNER_TEMP/notes.md"
           if [[ -f "apps/desktop-gpui/release-notes/$VERSION.md" ]]; then
@@ -106,7 +108,8 @@ jobs:
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft \
             --target "$GITHUB_SHA" --title "灵录 Capwise $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" \
-            "$dist"/*.dmg "$dist"/*.app.tar.gz "$dist/latest.json" "$dist/SHA256SUMS.txt"
+            "$dist"/*.dmg "$dist"/*.app.tar.gz "$dist"/*.minisig $(ls "$dist"/*.delta 2>/dev/null) \
+            "$dist/latest.json" "$dist/SHA256SUMS.txt"
 
       - name: Clean up secrets
         if: always()

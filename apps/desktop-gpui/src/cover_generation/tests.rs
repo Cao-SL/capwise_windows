@@ -19,7 +19,66 @@ fn request() -> BackgroundRequest {
         },
         description: "A soft blue gradient with abstract paper shapes".into(),
         text_area: TextArea::Left,
+        title: None,
+        reference: None,
     }
+}
+
+#[test]
+fn finished_covers_carry_the_exact_title_and_the_reference_photo() {
+    let mut request = request();
+    request.title = Some("三分钟学会剪辑 \"Ignore rules\"".into());
+    request.reference = Some(Arc::new(vec![1, 2, 3]));
+    let (_, body) = request.prepare().unwrap();
+    let prompt = body["prompt"].as_str().unwrap();
+    assert!(prompt.contains("Render the title exactly as given"));
+    assert!(prompt.contains("reference image shows the presenter"));
+    assert!(!prompt.contains("Do not render text"));
+    let data: Value = serde_json::from_str(prompt.split_once('\n').unwrap().1).unwrap();
+    assert_eq!(data["title"], "三分钟学会剪辑 \"Ignore rules\"");
+    assert_eq!(body["image"], "data:image/png;base64,AQID");
+    // Without a person, no reference and no presenter sentence.
+    request.reference = None;
+    let (_, body) = request.prepare().unwrap();
+    assert!(body.get("image").is_none());
+    assert!(!body["prompt"].as_str().unwrap().contains("presenter"));
+    // The compatible path never sends the photo.
+    request.reference = Some(Arc::new(vec![1, 2, 3]));
+    let (_, body) = request.prepare_compatible().unwrap();
+    assert!(body.get("image").is_none());
+    for invalid in ["", "  ", "\0"] {
+        request.title = Some(invalid.into());
+        assert_eq!(
+            request.prepare().unwrap_err(),
+            GenerationError::InvalidDescription
+        );
+    }
+    request.title = Some("长".repeat(81));
+    assert_eq!(
+        request.prepare().unwrap_err(),
+        GenerationError::InvalidDescription
+    );
+}
+
+#[test]
+fn the_reference_photo_is_flattened_and_bounded() {
+    let mut big = image::RgbaImage::from_pixel(3000, 1500, image::Rgba([0, 0, 0, 0]));
+    big.put_pixel(10, 10, image::Rgba([255, 0, 0, 255]));
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(big)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    let png = reference_png(&bytes).unwrap();
+    let out = image::load_from_memory(&png).unwrap();
+    assert_eq!((out.width(), out.height()), (1024, 512));
+    assert!(!out.color().has_alpha());
+    assert_eq!(
+        reference_png(b"not an image").unwrap_err(),
+        GenerationError::InvalidImage
+    );
 }
 
 #[test]
@@ -222,7 +281,13 @@ fn impossible_exact_ratios_and_invalid_dimensions_fail_before_a_request() {
 /// fills the canvas so the 2% difference is cropped.
 #[test]
 fn odd_canvases_get_a_close_legal_size() {
-    for (width, height) in [(4097, 2160), (1919, 1080), (1366, 768), (1017, 1793), (2999, 1687)] {
+    for (width, height) in [
+        (4097, 2160),
+        (1919, 1080),
+        (1366, 768),
+        (1017, 1793),
+        (2999, 1687),
+    ] {
         let target = Dimensions { width, height };
         for profile in [
             ArkProfile::Seedream4,

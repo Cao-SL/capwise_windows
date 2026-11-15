@@ -329,6 +329,14 @@ fn frame_seconds(frame: u32) -> f64 {
     frame as f64 / EDITOR_PREVIEW_FPS as f64
 }
 
+fn paused_preview_frame(playhead: f64, hover: Option<f64>) -> u32 {
+    let fps = f64::from(EDITOR_PREVIEW_FPS);
+    match hover {
+        Some(time) => (time * fps).floor() as u32,
+        None => (playhead * fps).round() as u32,
+    }
+}
+
 /// The new end of a timeline that an edit shortened past the playhead.
 fn playhead_past_end(playhead: f64, total: f64) -> Option<f64> {
     (total > 0.0 && playhead > total).then_some(total)
@@ -1664,6 +1672,11 @@ pub struct EditorWindow {
     /// `editorState.canvasSelection`.
     pub(crate) canvas_selection: Option<crate::editor_canvas::CanvasSelection>,
     pub(crate) canvas_text_edit: Option<crate::editor_canvas::CanvasTextEdit>,
+    caption_seek_preview: bool,
+    pub(crate) caption_edit: Option<crate::caption_canvas::CaptionCanvasEdit>,
+    /// The caption edit a press on the preview caption opened, still open to
+    /// become a drag instead.
+    pub(crate) caption_press: bool,
     /// `hovered` on `ElementBox` (`CanvasElementsOverlay.tsx:790`).
     pub(crate) hovered_canvas: Option<crate::editor_canvas::CanvasSelection>,
     /// The live display/camera drag.
@@ -2254,6 +2267,7 @@ impl EditorWindow {
             },
         ));
         let markers_state = markers::MarkersState::new(window, cx, &mut text_events);
+        text_events.push(crate::caption_canvas::install_caption_keys(window, cx));
         let player_frame_rect = crate::editor_canvas::canvas_rect_cell();
         let preview = cx.new(|_| PreviewFrameView::new(player_frame_rect.clone()));
         let editor = cx.entity();
@@ -2393,6 +2407,9 @@ impl EditorWindow {
             player_frame_rect,
             canvas_selection: None,
             canvas_text_edit: None,
+            caption_seek_preview: false,
+            caption_edit: None,
+            caption_press: false,
             hovered_canvas: None,
             player_panel_bounds: ui::SliderTrack::default(),
             player_panel_hovered: false,
@@ -2475,6 +2492,10 @@ impl EditorWindow {
         self.view.preview_time.unwrap_or(self.playhead).max(0.0)
     }
 
+    pub(crate) fn clear_timeline_preview(&mut self) -> bool {
+        self.view.preview_time.take().is_some()
+    }
+
     pub(crate) fn preview_resolution(&self) -> XY<u32> {
         preview_resolution_for_scale(self.preview_scale)
     }
@@ -2513,7 +2534,12 @@ impl EditorWindow {
     /// Where focus goes when a menu opens or a field commits: the root, so the
     /// window's own key handling (and the menu's arrows) resume.
     pub(crate) fn focus_handle_for_menu(&self) -> FocusHandle {
-        self.focus.clone()
+        self.sidebar
+            .title_cards
+            .layers
+            .text_dialog
+            .as_ref()
+            .map_or_else(|| self.focus.clone(), |dialog| dialog.focus.clone())
     }
 
     pub fn focus_root(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2999,6 +3025,88 @@ impl EditorWindow {
         cx.notify();
     }
 
+    /// One keystroke in a caption's text box. The full write path would
+    /// rebuild every timeline track, re-plan translations and re-render every
+    /// editor section per character; a text change only moves the caption
+    /// track, the sidebar list and the preview. Translations catch up when
+    /// the box commits.
+    pub(crate) fn edit_caption_text_live(&mut self, index: usize, text: String) -> bool {
+        if !self.project_ready() || self.voiceover.is_busy() {
+            return false;
+        }
+        let Some(segment) = self
+            .project
+            .timeline
+            .as_mut()
+            .and_then(|timeline| timeline.caption_segments.get_mut(index))
+        else {
+            return false;
+        };
+        if segment.text == text {
+            return false;
+        }
+        segment.text = text;
+        crate::transcription::write_caption_edit_to_source(
+            &mut self.project,
+            index,
+            &self.clip_display_durations,
+        );
+        self.caption_content_changed();
+        true
+    }
+
+    /// A write that only touched caption text or words, through the parts of
+    /// the shared fan-out it can affect. The timeline model reads nothing of
+    /// the captions but their track's boxes and labels, so only that track is
+    /// rebuilt.
+    pub(crate) fn edit_caption_content(
+        &mut self,
+        reason: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut ProjectConfiguration) -> bool,
+    ) -> bool {
+        if !self.project_ready() || self.voiceover.is_busy() {
+            return false;
+        }
+        if !change(&mut self.project) {
+            return false;
+        }
+        self.caption_content_changed();
+        self.schedule_save(window, cx);
+        self.queue_caption_translation_update(window, cx);
+        self.invalidate_caption_views(cx);
+        tracing::info!(reason, undo = self.history.can_undo(), "caption edit");
+        true
+    }
+
+    fn caption_content_changed(&mut self) {
+        self.synchronize_caption_track(false);
+        self.history.record(&self.project);
+        self.caption_track_replaced();
+    }
+
+    /// The caption track changed under the views that draw it.
+    pub(crate) fn caption_track_replaced(&mut self) {
+        self.transcript.dirty = true;
+        if let Some(timeline) = self.project.timeline.as_ref() {
+            self.timeline.caption = crate::editor_timeline::caption_track_segments(
+                &timeline.caption_segments,
+                self.timeline.total_duration,
+            );
+        }
+        self.publish_project();
+    }
+
+    /// Every section that draws caption text or the undo state a caption
+    /// edit moves. The toolbar and transport stay cached.
+    pub(crate) fn invalidate_caption_views(&mut self, cx: &mut Context<Self>) {
+        self.header.update(cx, |_, cx| cx.notify());
+        self.sidebar_view.update(cx, |_, cx| cx.notify());
+        self.transcript_view.update(cx, |_, cx| cx.notify());
+        self.timeline_view.update(cx, |_, cx| cx.notify());
+    }
+
     /// Swaps refined word times into the project and into every undo entry
     /// they apply to, so the refinement is not an undo step of its own and
     /// undoing an earlier edit keeps the refined times.
@@ -3085,7 +3193,37 @@ impl EditorWindow {
             return;
         };
         let mut preview = self.project.clone();
-        if let Some(edit) = &self.canvas_text_edit {
+        if let Some(dialog) = &self.sidebar.title_cards.layers.text_dialog
+            && let Some(item) = preview
+                .timeline
+                .as_mut()
+                .and_then(|timeline| timeline.text_segments.get_mut(dialog.card))
+                .and_then(|segment| segment.title_card.as_mut())
+                .and_then(|card| card.layers.get_mut(dialog.layer))
+        {
+            dialog.apply_to(item);
+        }
+        if self.caption_seek_preview
+            && !self.playing
+            && let Some(timeline) = preview.timeline.as_mut()
+        {
+            timeline.zoom_segments.clear();
+        }
+        preview.editing_caption = self.caption_edit_hides_caption();
+        if let Some(edit) = &self.canvas_text_edit
+            && let Some(layer) = edit.layer
+        {
+            // The words being typed show in the box, not under it.
+            if let Some(item) = preview
+                .timeline
+                .as_mut()
+                .and_then(|timeline| timeline.text_segments.get_mut(edit.index))
+                .and_then(|segment| segment.title_card.as_mut())
+                .and_then(|card| card.layers.get_mut(layer))
+            {
+                item.pose.opacity = 0.0;
+            }
+        } else if let Some(edit) = &self.canvas_text_edit {
             preview.editing_text_segment = Some(edit.index);
             if let Some(segment) = preview
                 .timeline
@@ -3098,10 +3236,9 @@ impl EditorWindow {
         }
         instance.project_config.0.send(preview).ok();
         if !self.playing {
-            let time = self.view.preview_time.unwrap_or(self.playhead).max(0.0);
             request_frame(
                 instance,
-                (time * EDITOR_PREVIEW_FPS as f64).floor() as u32,
+                paused_preview_frame(self.playhead, self.view.preview_time),
                 self.preview_resolution(),
             );
         }
@@ -3139,6 +3276,7 @@ impl EditorWindow {
             return;
         }
         self.commit_caption_editor_edit(window, cx);
+        self.finish_caption_edit(window, cx);
         self.stop_canvas_text_edit(cx);
         self.close_frame_controls(window, cx);
         self.end_field_edit(cx);
@@ -3156,6 +3294,7 @@ impl EditorWindow {
             return;
         }
         self.commit_caption_editor_edit(window, cx);
+        self.finish_caption_edit(window, cx);
         self.stop_canvas_text_edit(cx);
         self.close_frame_controls(window, cx);
         self.end_field_edit(cx);
@@ -3176,6 +3315,30 @@ impl EditorWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let active_card = self.selected_title_card();
+        let retained_role = active_card
+            .map(|(_, role)| role)
+            .or(self.sidebar.title_cards.empty_role)
+            .filter(|_| self.title_card_workspace_open());
+        let layer_id = active_card.and_then(|(index, _)| {
+            let crate::editor_canvas::CanvasSelection::CoverLayer(card_index, layer) =
+                self.canvas_selection?
+            else {
+                return None;
+            };
+            if card_index != index {
+                return None;
+            }
+            Some(
+                self.cover_card(index)?
+                    .title_card
+                    .as_ref()?
+                    .layers
+                    .get(layer)?
+                    .id
+                    .clone(),
+            )
+        });
         self.sidebar.style_target = None;
         self.sidebar.menu = None;
         self.text_menu = None;
@@ -3209,6 +3372,23 @@ impl EditorWindow {
             self.sidebar.source_tab = crate::editor_sidebar::initial_source_tab(&self.project);
         } else {
             self.sync_background_source_tab();
+        }
+        if let Some(role) = retained_role {
+            if self.project.title_card(role).is_some() {
+                self.focus_title_card(role, cx);
+                if let Some(((index, _), layer_id)) = self.selected_title_card().zip(layer_id)
+                    && let Some(layer) = self
+                        .cover_card(index)
+                        .and_then(|segment| segment.title_card.as_ref())
+                        .and_then(|card| card.layers.iter().position(|item| item.id == layer_id))
+                {
+                    self.canvas_selection = Some(
+                        crate::editor_canvas::CanvasSelection::CoverLayer(index, layer),
+                    );
+                }
+            } else {
+                self.sidebar.title_cards.empty_role = Some(role);
+            }
         }
         self.publish_project();
         self.schedule_save(window, cx);
@@ -3646,7 +3826,7 @@ impl EditorWindow {
         if (next - self.playhead).abs() < f64::EPSILON {
             return;
         }
-        let camera_scene_changed = self.sidebar.tab == crate::editor_sidebar::SidebarTab::Camera
+        let camera_scene_changed = self.camera_controls_visible()
             && self.camera_scene_index_at(self.playhead) != self.camera_scene_index_at(next);
         self.playhead = next;
         self.view.playhead = next;
@@ -3675,6 +3855,7 @@ impl EditorWindow {
             && next >= until - 1. / f64::from(EDITOR_PREVIEW_FPS)
         {
             self.stop_playback(cx);
+            self.caption_audition_ended(cx);
         }
 
         if self.playing && self.is_at_end() {
@@ -3734,6 +3915,10 @@ impl EditorWindow {
             return;
         }
         self.library_audition = None;
+        if self.caption_seek_preview {
+            self.caption_seek_preview = false;
+            self.publish_project();
+        }
         let Some(transport) = &self.transport else {
             return;
         };
@@ -3875,11 +4060,24 @@ impl EditorWindow {
     /// (`PlaybackHandle::seek`), so a scrub during playback holds the last
     /// picture for one decode instead of paying a warmup per tick.
     pub fn seek_to_time(&mut self, time: f64, cx: &mut Context<Self>) {
+        self.seek_with_preview_mode(time, false, cx);
+    }
+
+    pub(crate) fn seek_to_caption_time(&mut self, time: f64, cx: &mut Context<Self>) {
+        self.seek_with_preview_mode(time, !self.playing, cx);
+    }
+
+    fn seek_with_preview_mode(&mut self, time: f64, caption_preview: bool, cx: &mut Context<Self>) {
         if self.voiceover.is_busy() {
             return;
         }
         self.stop_canvas_text_edit(cx);
+        let mode_changed = self.caption_seek_preview != caption_preview;
+        self.caption_seek_preview = caption_preview;
         if self.apply_seek(time) {
+            if mode_changed {
+                self.publish_project();
+            }
             self.transcript_sync_active(true, cx);
             cx.notify();
         }
@@ -3960,7 +4158,7 @@ impl EditorWindow {
             return;
         }
         self.invalidate_hover_chrome(cx);
-        let camera_scene_changed = self.sidebar.tab == crate::editor_sidebar::SidebarTab::Camera
+        let camera_scene_changed = self.camera_controls_visible()
             && self.camera_scene_index_at(previous) != self.camera_scene_index_at(self.playhead);
         if self.camera3d_poses_at_playhead() != poses || camera_scene_changed {
             self.invalidate_sidebar(cx);
@@ -4174,6 +4372,7 @@ impl EditorWindow {
         if self.voiceover.is_open()
             || self.camera_framing.is_open()
             || self.caption_style_editor
+            || self.sidebar.title_cards.layers.text_dialog.is_some()
             || self.sidebar.caption_translation.review_is_open()
             || self.preset_dialog.is_some()
         {
@@ -4217,6 +4416,12 @@ impl EditorWindow {
     /// (`useEditorShortcuts.ts:10`) and `e.repeat` is ignored there
     /// (`:42`) as `is_held` is here.
     fn on_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cover_crop_key(&event.keystroke.key, window, cx)
+            || self.cover_text_dialog_key(event, window, cx)
+        {
+            cx.stop_propagation();
+            return;
+        }
         if !self.visual_ready() {
             return;
         }
@@ -4689,6 +4894,12 @@ impl EditorWindow {
                 cx.stop_propagation();
                 window.refresh();
             }
+            "enter" if !keystroke.modifiers.modified() => {
+                if self.edit_selected_caption(window, cx) {
+                    cx.stop_propagation();
+                    window.refresh();
+                }
+            }
             "s" => {
                 cx.stop_propagation();
                 self.toggle_split_mode(cx);
@@ -4723,6 +4934,8 @@ impl EditorWindow {
                 }
                 if self.split_mode {
                     self.toggle_split_mode(cx);
+                } else if self.title_card_workspace_open() {
+                    self.close_title_card_workspace(cx);
                 } else if self.selection.is_some() {
                     self.set_selection(None, cx);
                     self.note_edit("deselect", None);
@@ -4897,10 +5110,9 @@ impl EditorWindow {
         if self.playing {
             return;
         }
-        let time = self.view.preview_time.unwrap_or(self.playhead).max(0.0);
         request_frame(
             instance,
-            (time * EDITOR_PREVIEW_FPS as f64).floor() as u32,
+            paused_preview_frame(self.playhead, self.view.preview_time),
             self.preview_resolution(),
         );
     }
@@ -4922,7 +5134,18 @@ impl EditorWindow {
         // writes, so a preview time set while paused survives a play rather
         // than being cleared. The ghost is hidden by the render's own
         // `!editorState.playing` gate instead (`TL/index.tsx:1246-1253`).
-        if self.playing || self.drag.is_some() || self.minimap_drag.is_some() {
+        if self.playing
+            || self.drag.is_some()
+            || self.minimap_drag.is_some()
+            || self
+                .canvas_drag
+                .as_ref()
+                .is_some_and(|drag| drag.element.cover_card().is_some())
+            || (self.title_card_workspace_open()
+                && self
+                    .selected_title_card()
+                    .is_some_and(|(index, _)| self.title_card_at_playhead(index)))
+        {
             return;
         }
         let viewport_width: f32 = window.viewport_size().width.into();
@@ -5135,6 +5358,17 @@ impl EditorWindow {
         cx: &mut Context<Self>,
     ) {
         if self.selection != selection {
+            if self.caption_seek_preview
+                && selection
+                    .as_ref()
+                    .is_none_or(|selection| selection.track != TrackKind::Caption)
+            {
+                self.caption_seek_preview = false;
+                self.publish_project();
+            }
+            if selection.is_some() {
+                self.sidebar.title_cards.empty_role = None;
+            }
             self.selected_keyframe = None;
             self.stop_canvas_text_edit(cx);
             self.text_menu = None;
@@ -5411,15 +5645,15 @@ impl EditorWindow {
         cx.stop_propagation();
 
         if kind == TrackKind::Text
-            && self
+            && let Some(role) = self
                 .project
                 .timeline
                 .as_ref()
                 .and_then(|timeline| timeline.text_segments.get(index))
-                .is_some_and(|segment| segment.title_card.is_some())
+                .and_then(|segment| segment.title_card.as_ref())
+                .map(|card| card.role)
         {
-            self.set_selection(Some(Selection::single(kind, index)), cx);
-            self.seek_to_time(press_time, cx);
+            self.browse_title_card(role, window, cx);
             if self.split_mode || matches!(hit, Hit::Handle { .. }) {
                 self.show_notice(tr::editor::title_cards::dedicated_controls(), window, cx);
             }
@@ -6639,7 +6873,7 @@ fn fresh_caption_source_id(project: &ProjectConfiguration) -> String {
     }
 }
 
-fn split_caption_segment(
+pub(crate) fn split_caption_segment(
     project: &mut ProjectConfiguration,
     index: usize,
     at: f64,
@@ -7631,6 +7865,9 @@ impl EditorWindow {
     /// them in reverse and refuses to empty itself, and the scene track's
     /// action takes one index at a time for the same reason.
     pub(crate) fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.delete_cover_selection(window, cx) {
+            return;
+        }
         if let Some(popover) = self.transition_popover.take() {
             self.set_clip_transition(popover.index, None, window, cx);
             cx.notify();
@@ -8353,10 +8590,6 @@ impl EditorWindow {
 
     /// The header's undo and redo buttons (`Header.tsx:145-168`).
     ///
-    /// Two quirks, both transcribed: the click **clears the timeline selection
-    /// first** and only then walks the history, and the disabled predicate is
-    /// `!canUndo() && !selection` -- so a button with nothing to undo is still
-    /// enabled while something is selected, and pressing it just deselects.
     fn history_button(
         &self,
         id: &'static str,
@@ -8370,7 +8603,8 @@ impl EditorWindow {
         } else {
             self.history.can_redo()
         };
-        let enabled = self.project_ready() && (can || self.selection.is_some());
+        let enabled = self.project_ready()
+            && (can || (self.selection.is_some() && !self.title_card_workspace_open()));
         ui::EditorButton::plain(&theme, id)
             .left_icon(icon)
             .disabled(!enabled)
@@ -8387,8 +8621,7 @@ impl EditorWindow {
                 {
                     return;
                 }
-                let had_selection = this.selection.is_some();
-                if had_selection {
+                if !this.title_card_workspace_open() && this.selection.is_some() {
                     this.set_selection(None, cx);
                 }
                 if undo {
@@ -12289,7 +12522,24 @@ impl EditorWindow {
             .px(px(12.))
             .flex_none()
             .overflow_hidden()
-            .child(self.render_player_actions(narrow, cx))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(if self.title_card_workspace_open() {
+                        div()
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(Hsla::from(self.theme.editor.text_2))
+                            .children(
+                                self.selected_title_card()
+                                    .map(|_| tr::editor::cover_templates::canvas_hint()),
+                            )
+                            .into_any_element()
+                    } else {
+                        self.render_player_actions(narrow, cx).into_any_element()
+                    }),
+            )
         // Capwise hides the preview-resolution control: it only trades
         // preview sharpness for speed, never touches the export, and users
         // could not tell what "Full / 1/2 / 1/4" meant. The preview always
@@ -12500,12 +12750,25 @@ impl EditorWindow {
                     this.focus_root(window, cx);
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.caption_click_while_playing(event, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .child(body)
             // `CanvasElementsOverlay` + `SnapGuidesOverlay`
             // (`Player.tsx:636-643`), both mounted inside the letterbox
             // wrapper and only while a frame exists.
             .children(if self.project_ready() {
                 self.render_canvas_overlay(cx)
+            } else {
+                None
+            })
+            .children(if self.project_ready() {
+                self.render_caption_edit(cx)
             } else {
                 None
             })
@@ -14062,6 +14325,7 @@ fn dismiss_indexed_sidebar_menu(menu: &mut Option<crate::editor_tabs::OpenMenu>)
 
     let indexed = menu.as_ref().is_some_and(|menu| match menu.kind {
         SidebarMenu::TextFontFamily(_)
+        | SidebarMenu::CoverFontFamily(..)
         | SidebarMenu::TextWeight(_)
         | SidebarMenu::Camera3DEasing(_) => true,
         SidebarMenu::BackgroundCornerStyle
@@ -14099,6 +14363,7 @@ fn is_playback_shortcut(
 
 impl Render for EditorWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_caption_edit(window, cx);
         if self.audio_picker.is_none() && !self.voiceover.is_open() {
             self.library_audition = None;
         }
@@ -14659,10 +14924,12 @@ impl Render for EditorWindow {
             )
             .children(self.render_camera_ratio_dialog(cx))
             .children(self.render_caption_style_editor(window, cx))
+            .children(self.render_cover_text_dialog(window, cx))
             .children(self.render_translation_review(window, cx))
             .children(self.with_style_controls(|this| this.render_sidebar_menu(cx)))
             .children(self.render_toolbar_menu(cx))
             .children(self.render_text_menu(cx))
+            .children(self.render_cover_layer_menu(cx))
             .children(self.render_frame_controls(window, cx))
             .children(self.render_add_track_popover(window, cx))
             .children(self.render_sticker_picker(cx))
@@ -14697,6 +14964,7 @@ impl Render for EditorWindow {
             // Crop mode is a modal: it goes over everything, including the
             // menu above.
             .children(self.render_crop_dialog(cx))
+            .children(self.render_cover_image_crop(window, cx))
             // ...and its own pointer-capture stand-in over that, which is
             // `trackPointerSession`'s `setPointerCapture` + window listeners
             // (`Cropper.tsx:686-733`).
@@ -14890,6 +15158,21 @@ fn hex_to_color(rgba: [u8; 4]) -> cap_project::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cover_flow_paused_render_preserves_the_seek_frame_at_the_outro_boundary() {
+        let mut outro =
+            cap_project::TextSegment::new_title_card(cap_project::TitleCardRole::Outro, "Outro");
+        outro.start = 16.08;
+        outro.end = 16.58;
+        let time =
+            crate::editor_title_cards::card_preview_time(&outro, EDITOR_PREVIEW_FPS).unwrap();
+        assert_eq!((time * f64::from(EDITOR_PREVIEW_FPS)).floor() as u32, 964);
+        let frame = paused_preview_frame(time, None);
+        assert_eq!(frame, 965);
+        assert!(frame_seconds(frame) >= outro.start);
+        assert_eq!(paused_preview_frame(time, Some(8.013)), 480);
+    }
 
     #[cfg(target_os = "linux")]
     mod canvas_history {
