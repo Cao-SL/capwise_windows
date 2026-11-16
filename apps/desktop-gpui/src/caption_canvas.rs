@@ -218,6 +218,8 @@ pub(crate) fn install_caption_keys(
     })
 }
 
+pub(crate) const CAPTION_TEXT_IDLE: std::time::Duration = std::time::Duration::from_millis(650);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CaptionTextOwner {
     Sidebar,
@@ -509,9 +511,7 @@ impl EditorWindow {
         }
         self.caption_text_draft = Some(CaptionTextDraft { id, owner, text });
         self.caption_text_commit_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(220))
-                .await;
+            cx.background_executor().timer(CAPTION_TEXT_IDLE).await;
             this.update(cx, |this, cx| this.commit_caption_text_draft(cx))
                 .ok();
         }));
@@ -588,7 +588,7 @@ impl EditorWindow {
             settings.set_translation(id, &source_text, text.to_owned(), language);
         }
         self.history.record(&self.project);
-        self.publish_project();
+        self.publish_caption_edit();
         true
     }
 

@@ -62,7 +62,7 @@
 //! Return inserts a newline instead of committing, the text wraps to the
 //! element's width, and the element measures its own height.
 
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
@@ -223,7 +223,7 @@ fn ctrl_bindings(ctx: Option<&str>) -> [KeyBinding; 17] {
 /// Every live [`TextInputState`], weakly. Registered on construction and
 /// pruned when the entity goes.
 #[derive(Default)]
-struct LiveInputs(RefCell<Vec<WeakEntity<TextInputState>>>);
+struct LiveInputs(RefCell<HashMap<ElementId, WeakEntity<TextInputState>>>);
 
 impl gpui::Global for LiveInputs {}
 
@@ -237,39 +237,40 @@ impl gpui::Global for LiveInputs {}
 /// keystroke outright -- but a bare `s` cannot be bound at all without breaking
 /// typing, so it is checked instead.
 pub fn text_input_has_focus(window: &Window, cx: &App) -> bool {
-    let Some(live) = cx.try_global::<LiveInputs>() else {
-        return false;
-    };
-    let inputs = live.0.borrow();
-    inputs.iter().any(|weak| {
-        weak.upgrade()
-            .is_some_and(|entity| entity.read(cx).focus.is_focused(window))
-    })
+    focused_text_input(window, cx).is_some()
 }
 
 /// Is a focused field in this window composing IME text? Tab belongs to the
 /// input method then.
 pub fn text_input_is_composing(window: &Window, cx: &App) -> bool {
-    let Some(live) = cx.try_global::<LiveInputs>() else {
-        return false;
-    };
-    let inputs = live.0.borrow();
-    inputs.iter().any(|weak| {
-        weak.upgrade().is_some_and(|entity| {
-            let input = entity.read(cx);
-            input.marked_range.is_some() && input.focus.is_focused(window)
-        })
-    })
+    focused_text_input(window, cx).is_some_and(|entity| entity.read(cx).marked_range.is_some())
 }
 
-fn register_live_input(weak: WeakEntity<TextInputState>, cx: &mut App) {
+fn focused_text_input(window: &Window, cx: &App) -> Option<Entity<TextInputState>> {
+    let focus = window.focused(cx)?;
+    cx.try_global::<LiveInputs>()?
+        .0
+        .borrow()
+        .get(&ElementId::from(&focus))?
+        .upgrade()
+}
+
+fn register_live_input(focus: &FocusHandle, cx: &mut Context<TextInputState>) {
     if !cx.has_global::<LiveInputs>() {
         cx.set_global(LiveInputs::default());
     }
-    let live = cx.global::<LiveInputs>();
-    let mut inputs = live.0.borrow_mut();
-    inputs.retain(|weak| weak.upgrade().is_some());
-    inputs.push(weak);
+    let id = ElementId::from(focus);
+    let weak = cx.weak_entity();
+    cx.global::<LiveInputs>()
+        .0
+        .borrow_mut()
+        .insert(id.clone(), weak);
+    cx.on_release(move |_, cx| {
+        if let Some(live) = cx.try_global::<LiveInputs>() {
+            live.0.borrow_mut().remove(&id);
+        }
+    })
+    .detach();
 }
 
 // -- Events -------------------------------------------------------------------
@@ -607,8 +608,8 @@ pub struct TextInputState {
 
 impl TextInputState {
     fn new(multi_line: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        register_live_input(cx.weak_entity(), cx);
         let focus = cx.focus_handle();
+        register_live_input(&focus, cx);
         let blur = cx.on_blur(&focus, window, |this: &mut Self, _window, cx| {
             this.drag = None;
             cx.emit(TextInputEvent::Blurred);
@@ -3499,6 +3500,35 @@ mod tests {
                     assert_eq!(state.marked_range, None);
                 });
             }
+        });
+    }
+
+    #[gpui::test]
+    fn text_input_focus_lookup_tracks_composition_and_released_inputs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = cx.add_empty_window();
+        let (first, second) = window.update(|window, cx| {
+            let first = cx.new(|cx| TextInputState::multi_line(window, cx));
+            let second = cx.new(|cx| TextInputState::multi_line(window, cx));
+            assert!(!text_input_has_focus(window, cx));
+            window.focus(&first.read(cx).focus_handle(), cx);
+            assert_eq!(focused_text_input(window, cx), Some(first.clone()));
+            first.update(cx, |state, cx| {
+                state.replace_and_mark_text_in_range(None, "zi", None, window, cx);
+            });
+            assert!(text_input_is_composing(window, cx));
+            window.focus(&second.read(cx).focus_handle(), cx);
+            assert_eq!(focused_text_input(window, cx), Some(second.clone()));
+            assert!(!text_input_is_composing(window, cx));
+            (first, second)
+        });
+        drop(second);
+        window.update(|window, cx| assert!(!text_input_has_focus(window, cx)));
+        window.update(|window, cx| {
+            assert_eq!(cx.global::<LiveInputs>().0.borrow().len(), 1);
+            window.focus(&first.read(cx).focus_handle(), cx);
+            assert!(text_input_is_composing(window, cx));
         });
     }
 

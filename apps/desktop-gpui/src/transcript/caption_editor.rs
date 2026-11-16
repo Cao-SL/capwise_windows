@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc};
 
 use cap_project::{CaptionSegment, ProjectConfiguration};
 use gpui::{
@@ -399,7 +399,7 @@ impl EditorWindow {
         editor.draft = Some((id, text));
         editor.commit_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(220))
+                .timer(crate::caption_canvas::CAPTION_TEXT_IDLE)
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.commit_caption_editor_edit(window, cx)

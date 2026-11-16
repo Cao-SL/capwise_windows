@@ -3084,7 +3084,7 @@ impl EditorWindow {
             }
             self.update_caption_editor_row(source_id);
             self.history.record(&self.project);
-            self.publish_project();
+            self.publish_caption_edit();
         } else {
             self.caption_content_changed();
         }
@@ -3130,7 +3130,7 @@ impl EditorWindow {
                 self.timeline.total_duration,
             );
         }
-        self.publish_project();
+        self.publish_caption_edit();
     }
 
     /// Every section that draws caption text or the undo state a caption
@@ -3221,6 +3221,14 @@ impl EditorWindow {
     /// the re-render is skipped while playing exactly as `emitRenderFrame`'s
     /// `if (!editorState.playing)` gate does (`:493`).
     pub(crate) fn publish_project(&self) {
+        self.publish_project_config(true);
+    }
+
+    pub(crate) fn publish_caption_edit(&self) {
+        self.publish_project_config(!self.caption_edit_hides_caption());
+    }
+
+    fn publish_project_config(&self, redraw_paused_frame: bool) {
         if !self.project_ready() {
             return;
         }
@@ -3270,7 +3278,7 @@ impl EditorWindow {
             }
         }
         instance.project_config.0.send(preview).ok();
-        if !self.playing {
+        if redraw_paused_frame && !self.playing {
             request_frame(
                 instance,
                 paused_preview_frame(self.playhead, self.view.preview_time),
