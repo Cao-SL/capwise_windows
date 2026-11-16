@@ -31,6 +31,9 @@ const WIDTH: f32 = 2.;
 /// How often a recording rereads where its window is.
 const FOLLOW: Duration = Duration::from_millis(120);
 
+const AREA_RADIUS: f32 = 2.;
+const HAIRLINE: f32 = 1.;
+
 /// The corner radius of other apps' windows, which the ring follows.
 const WINDOW_RADIUS: f32 = if cfg!(target_os = "macos") {
     16.
@@ -40,28 +43,69 @@ const WINDOW_RADIUS: f32 = if cfg!(target_os = "macos") {
     10.
 };
 
-/// The ring around `window`, positioned in the same space as `window`: a
-/// crisp line with two fainter ones outside it for a glow. Borders only, since
-/// gpui paints a box shadow under the whole element and would tint the window.
+/// The ring around `window`, positioned in the same space as `window`.
 pub fn ring(window: AreaRect, theme: &Theme) -> impl IntoElement {
+    bands(window, OUTSET, WINDOW_RADIUS, theme)
+}
+
+/// The ring around an area being recorded, in the same space as `area` on a
+/// display of `display` size. It hugs the area's edge with no gap, since the
+/// area is an exact rectangle. A side flush with the display edge has no room
+/// outside, so the ring steps in on that side rather than vanish there.
+pub fn area_ring(area: AreaRect, display: (f32, f32), theme: &Theme) -> impl IntoElement {
+    let edge = 3. * WIDTH + HAIRLINE;
+    let left = area.x.max(edge);
+    let top = area.y.max(edge);
+    let right = (area.x + area.width).min(display.0 - edge).max(left);
+    let bottom = (area.y + area.height).min(display.1 - edge).max(top);
+    let rect = AreaRect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    };
+    // A dark hairline outside the glow keeps the ring visible over blue or
+    // very light content, where the accent alone fades into what is behind it.
+    div()
+        .absolute()
+        .size_full()
+        .child(bands(rect, WIDTH, AREA_RADIUS, theme))
+        .child(
+            div()
+                .absolute()
+                .left(px(rect.x - edge))
+                .top(px(rect.y - edge))
+                .w(px(rect.width + 2. * edge))
+                .h(px(rect.height + 2. * edge))
+                .rounded(px(AREA_RADIUS + edge))
+                .border(px(HAIRLINE))
+                .border_color(gpui::hsla(0., 0., 0., 0.35)),
+        )
+}
+
+/// A crisp line with two fainter ones outside it for a glow. Borders only,
+/// since gpui paints a box shadow under the whole element and would tint what
+/// it surrounds.
+fn bands(rect: AreaRect, outset: f32, radius: f32, theme: &Theme) -> impl IntoElement {
     let color = gpui::Hsla::from(theme.blue_9);
-    let band = |outset: f32, alpha: f32| {
+    let band = |extra: f32, alpha: f32| {
+        let outset = outset + extra;
         div()
             .absolute()
-            .left(px(window.x - outset))
-            .top(px(window.y - outset))
-            .w(px(window.width + 2. * outset))
-            .h(px(window.height + 2. * outset))
-            .rounded(px(WINDOW_RADIUS + outset))
+            .left(px(rect.x - outset))
+            .top(px(rect.y - outset))
+            .w(px(rect.width + 2. * outset))
+            .h(px(rect.height + 2. * outset))
+            .rounded(px(radius + outset))
             .border(px(WIDTH))
             .border_color(color.opacity(alpha))
     };
     div()
         .absolute()
         .size_full()
-        .child(band(OUTSET + 2. * WIDTH, 0.1))
-        .child(band(OUTSET + WIDTH, 0.28))
-        .child(band(OUTSET, 0.9))
+        .child(band(2. * WIDTH, 0.1))
+        .child(band(WIDTH, 0.28))
+        .child(band(0., 0.9))
 }
 
 struct FocusBorderWindow(WindowHandle<FocusBorder>);
