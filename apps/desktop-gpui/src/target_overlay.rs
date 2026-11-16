@@ -3042,6 +3042,15 @@ impl OverlayWindow {
         // full-screen rectangle while nothing is drawn).
         let dim: Hsla = gpui::hsla(0., 0., 0., 0.45);
         root = match shown {
+            // A recording marks its area with a ring alone: a dimmed screen
+            // for the whole take gets in the way of everything outside it.
+            Some(crop) if self.recording_area => {
+                return root.child(crate::focus_border::area_ring(
+                    crop,
+                    self.display_size,
+                    &self.theme,
+                ));
+            }
             None => root.child(div().absolute().inset_0().bg(dim)),
             Some(crop) => root
                 .child(
