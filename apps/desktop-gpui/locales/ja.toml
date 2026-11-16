@@ -3685,6 +3685,10 @@ project_changed = "書き出しの準備中にプロジェクトが変更され�
 [editor.review]
 action = "AI字幕最適化"
 running = "字幕を最適化中…"
+proofreading = "字幕を校正中 · {completed}/{total} 行"
+reflow = "字幕の改行を調整中 · {completed}/{total} バッチ"
+saving = "字幕を保存中…"
+request_timeout = "AI による字幕の校正がタイムアウトしました。元の字幕は保存されています。もう一度お試しください。"
 cancel = "キャンセル"
 hidden = "字幕から非表示"
 invalid = "校正結果が検証に合格しなかったため、元の字幕を保持しました。再試行してください。"

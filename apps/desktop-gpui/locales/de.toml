@@ -3685,6 +3685,10 @@ project_changed = "Das Projekt wurde während der Exportvorbereitung geändert. 
 [editor.review]
 action = "KI-Untertiteloptimierung"
 running = "Untertitel werden optimiert…"
+proofreading = "Untertitel prüfen · {completed}/{total} Zeilen"
+reflow = "Zeilenumbrüche anpassen · {completed}/{total} Gruppen"
+saving = "Untertitel werden gespeichert…"
+request_timeout = "Die KI hat für eine Gruppe zu lange gebraucht. Die ursprünglichen Untertitel wurden beibehalten. Versuche es erneut."
 cancel = "Abbrechen"
 hidden = "Aus Untertiteln ausgeblendet"
 invalid = "Die Prüfantwort hat die Validierung nicht bestanden. Die ursprünglichen Untertitel wurden behalten; versuche es erneut."

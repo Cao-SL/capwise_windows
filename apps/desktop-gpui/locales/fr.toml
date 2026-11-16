@@ -3685,6 +3685,10 @@ project_changed = "Le projet a changé pendant la préparation de l'exportation.
 [editor.review]
 action = "Optimisation des sous-titres par IA"
 running = "Optimisation des sous-titres…"
+proofreading = "Révision des sous-titres · {completed}/{total} lignes"
+reflow = "Ajustement des retours à la ligne · {completed}/{total} lots"
+saving = "Enregistrement des sous-titres…"
+request_timeout = "L’IA a mis trop de temps à réviser un lot. Les sous-titres d’origine ont été conservés. Réessayez."
 cancel = "Annuler"
 hidden = "Masqué dans les sous-titres"
 invalid = "La réponse de révision n'a pas passé la validation. Les sous-titres originaux ont été conservés ; réessayez."
