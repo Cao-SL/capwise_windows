@@ -1414,20 +1414,24 @@ pub(crate) fn caption_track_segments(
 ) -> Vec<Segment> {
     segments
         .iter()
-        .map(|segment| Segment {
-            keyframes: Default::default(),
-            start: segment.start,
-            end: segment.end.min(total_duration),
-            lane: 0,
-            detail: SegmentDetail::Caption {
-                text: if segment.text.is_empty() {
-                    SharedString::new_static(tr::editor::timeline::segment::caption())
-                } else {
-                    SharedString::from(segment.text.clone())
-                },
-            },
-        })
+        .map(|segment| caption_track_segment(segment, total_duration))
         .collect()
+}
+
+pub(crate) fn caption_track_segment(segment: &CaptionTrackSegment, total_duration: f64) -> Segment {
+    Segment {
+        keyframes: Default::default(),
+        start: segment.start,
+        end: segment.end.min(total_duration),
+        lane: 0,
+        detail: SegmentDetail::Caption {
+            text: if segment.text.is_empty() {
+                SharedString::new_static(tr::editor::timeline::segment::caption())
+            } else {
+                SharedString::from(segment.text.clone())
+            },
+        },
+    }
 }
 
 impl TimelineModel {

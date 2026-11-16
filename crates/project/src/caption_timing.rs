@@ -436,23 +436,89 @@ pub fn derive_caption_track_segments(
     mapped
         .into_iter()
         .map(|segment| {
-            let overrides = overrides_by_source_id.get(source_caption_id(&segment.id));
-            CaptionTrackSegment {
-                id: segment.id,
-                start: segment.start,
-                end: segment.end,
-                text: segment.text,
-                words: segment.words,
-                fade_duration_override: overrides.and_then(|o| o.fade_duration_override),
-                linger_duration_override: overrides.and_then(|o| o.linger_duration_override),
-                position_override: overrides.and_then(|o| o.position_override.clone()),
-                color_override: overrides.and_then(|o| o.color_override.clone()),
-                background_color_override: overrides
-                    .and_then(|o| o.background_color_override.clone()),
-                font_size_override: overrides.and_then(|o| o.font_size_override),
-            }
+            let overrides = overrides_by_source_id
+                .get(source_caption_id(&segment.id))
+                .copied();
+            mapped_track_segment(segment, overrides)
         })
         .collect()
+}
+
+fn mapped_track_segment(
+    segment: MappedCaption,
+    overrides: Option<&CaptionTrackSegment>,
+) -> CaptionTrackSegment {
+    CaptionTrackSegment {
+        id: segment.id,
+        start: segment.start,
+        end: segment.end,
+        text: segment.text,
+        words: segment.words,
+        fade_duration_override: overrides.and_then(|o| o.fade_duration_override),
+        linger_duration_override: overrides.and_then(|o| o.linger_duration_override),
+        position_override: overrides.and_then(|o| o.position_override.clone()),
+        color_override: overrides.and_then(|o| o.color_override.clone()),
+        background_color_override: overrides.and_then(|o| o.background_color_override.clone()),
+        font_size_override: overrides.and_then(|o| o.font_size_override),
+    }
+}
+
+pub fn update_caption_text_projection(
+    project: &mut ProjectConfiguration,
+    source_id: &str,
+    recording_durations: &[f64],
+) -> Option<Vec<usize>> {
+    let captions = project
+        .captions
+        .as_ref()
+        .filter(|captions| captions.source_timed)?;
+    let mut sources = captions
+        .segments
+        .iter()
+        .filter(|segment| segment.id == source_id);
+    let source = sources.next()?;
+    if sources.next().is_some() {
+        return None;
+    }
+    let timeline = project.timeline.as_mut()?;
+    if timeline.segments.is_empty() || recording_durations.is_empty() {
+        return None;
+    }
+    let mut mapped = map_captions_to_edited_timeline(
+        std::slice::from_ref(source),
+        timeline,
+        recording_durations,
+    );
+    mapped.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let indices: Vec<_> = timeline
+        .caption_segments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, segment)| {
+            (source_caption_id(&segment.id) == source_id).then_some(index)
+        })
+        .collect();
+    if mapped.len() != indices.len()
+        || mapped.iter().zip(&indices).any(|(next, &index)| {
+            let current = &timeline.caption_segments[index];
+            next.id != current.id
+                || next.start.to_bits() != current.start.to_bits()
+                || next.end.to_bits() != current.end.to_bits()
+        })
+    {
+        return None;
+    }
+    let overrides = indices
+        .first()
+        .map(|&index| &timeline.caption_segments[index]);
+    let replacements: Vec<_> = mapped
+        .into_iter()
+        .map(|segment| mapped_track_segment(segment, overrides))
+        .collect();
+    for (&index, segment) in indices.iter().zip(replacements) {
+        timeline.caption_segments[index] = segment;
+    }
+    Some(indices)
 }
 
 pub fn synchronize_captions(project: &mut ProjectConfiguration, recording_durations: &[f64]) {
@@ -642,6 +708,57 @@ mod tests {
             captions: Some(CaptionsData { source_timed, segments:vec![CaptionSegment { id:"spoken".into(),start,end,text:"hello".into(),words:vec![CaptionWord { text:"hello".into(),start,end, hidden: false }] }], ..Default::default() }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn text_projection_updates_every_repeated_fragment_and_keeps_other_rows() {
+        let mut project = project(true, 1.0, 2.0);
+        let timeline = project.timeline.as_mut().unwrap();
+        timeline.segments.push(timeline.segments[0].clone());
+        timeline.segments[2].timescale = 2.0;
+        let captions = project.captions.as_mut().unwrap();
+        let mut unrelated = captions.segments[0].clone();
+        unrelated.id = "unrelated".into();
+        unrelated.start = 7.0;
+        unrelated.end = 8.0;
+        unrelated.words[0].start = 7.0;
+        unrelated.words[0].end = 8.0;
+        captions.segments.push(unrelated);
+        synchronize_captions(&mut project, &[10.0]);
+        let track = &mut project.timeline.as_mut().unwrap().caption_segments;
+        track[0].font_size_override = Some(30);
+        let original_unrelated = track[1].text.as_ptr();
+        let segment = &mut project.captions.as_mut().unwrap().segments[0];
+        segment.text = "中文".into();
+        segment.words[0].text = "中文".into();
+
+        let mut expected = project.clone();
+        synchronize_captions(&mut expected, &[10.0]);
+        assert_eq!(
+            update_caption_text_projection(&mut project, "spoken", &[10.0]),
+            Some(vec![0, 2])
+        );
+        let track = &project.timeline.as_ref().unwrap().caption_segments;
+        let expected = &expected.timeline.as_ref().unwrap().caption_segments;
+        assert_eq!(
+            serde_json::to_value(track).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(track[1].text.as_ptr(), original_unrelated);
+        assert_eq!(track[2].font_size_override, Some(30));
+    }
+
+    #[test]
+    fn text_projection_falls_back_without_writing_when_timing_changes() {
+        let mut project = project(true, 1.0, 2.0);
+        synchronize_captions(&mut project, &[10.0]);
+        let before = serde_json::to_value(&project.timeline).unwrap();
+        project.captions.as_mut().unwrap().segments[0].words[0].start = 1.5;
+        assert_eq!(
+            update_caption_text_projection(&mut project, "spoken", &[10.0]),
+            None
+        );
+        assert_eq!(serde_json::to_value(&project.timeline).unwrap(), before);
     }
 
     #[test]

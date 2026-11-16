@@ -1674,6 +1674,8 @@ pub struct EditorWindow {
     pub(crate) canvas_text_edit: Option<crate::editor_canvas::CanvasTextEdit>,
     caption_seek_preview: bool,
     pub(crate) caption_edit: Option<crate::caption_canvas::CaptionCanvasEdit>,
+    pub(crate) caption_text_draft: Option<crate::caption_canvas::CaptionTextDraft>,
+    pub(crate) caption_text_commit_task: Option<gpui::Task<()>>,
     /// The caption edit a press on the preview caption opened, still open to
     /// become a drag instead.
     pub(crate) caption_press: bool,
@@ -2409,6 +2411,8 @@ impl EditorWindow {
             canvas_text_edit: None,
             caption_seek_preview: false,
             caption_edit: None,
+            caption_text_draft: None,
+            caption_text_commit_task: None,
             caption_press: false,
             hovered_canvas: None,
             player_panel_bounds: ui::SliderTrack::default(),
@@ -2513,10 +2517,17 @@ impl EditorWindow {
         self.pending_save.clone()
     }
 
+    pub(crate) fn commit_caption_drafts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_caption_text_draft(cx);
+        self.commit_caption_editor_edit(window, cx);
+    }
+
     pub(crate) fn flush_pending_saves(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        if self.apply_caption_editor_draft_for_save() {
-            self.project_changed_live(cx);
+        let inline_changed = self.apply_caption_text_draft();
+        let bulk_changed = self.apply_caption_editor_draft_for_save();
+        if inline_changed || bulk_changed {
             self.pending_save.borrow_mut().queue(self.project.clone());
+            self.invalidate_caption_views(cx);
         }
         self.commit_pretty_name(cx)?;
         self.pending_save
@@ -3025,11 +3036,6 @@ impl EditorWindow {
         cx.notify();
     }
 
-    /// One keystroke in a caption's text box. The full write path would
-    /// rebuild every timeline track, re-plan translations and re-render every
-    /// editor section per character; a text change only moves the caption
-    /// track, the sidebar list and the preview. Translations catch up when
-    /// the box commits.
     pub(crate) fn edit_caption_text_live(&mut self, index: usize, text: String) -> bool {
         if !self.project_ready() || self.voiceover.is_busy() {
             return false;
@@ -3045,14 +3051,43 @@ impl EditorWindow {
         if segment.text == text {
             return false;
         }
+        let source_id = cap_project::source_caption_id(&segment.id).to_owned();
         segment.text = text;
         crate::transcription::write_caption_edit_to_source(
             &mut self.project,
             index,
             &self.clip_display_durations,
         );
-        self.caption_content_changed();
+        self.caption_text_content_changed(&source_id);
         true
+    }
+
+    pub(crate) fn caption_text_content_changed(&mut self, source_id: &str) {
+        let can_update_timeline =
+            self.project.timeline.as_ref().is_some_and(|timeline| {
+                timeline.caption_segments.len() == self.timeline.caption.len()
+            });
+        if can_update_timeline
+            && let Some(indices) = cap_project::update_caption_text_projection(
+                &mut self.project,
+                source_id,
+                &self.clip_display_durations,
+            )
+            && let Some(timeline) = &self.project.timeline
+        {
+            self.caption_sync_signature = None;
+            for index in indices {
+                self.timeline.caption[index] = crate::editor_timeline::caption_track_segment(
+                    &timeline.caption_segments[index],
+                    self.timeline.total_duration,
+                );
+            }
+            self.update_caption_editor_row(source_id);
+            self.history.record(&self.project);
+            self.publish_caption_edit();
+        } else {
+            self.caption_content_changed();
+        }
     }
 
     /// A write that only touched caption text or words, through the parts of
@@ -3095,7 +3130,7 @@ impl EditorWindow {
                 self.timeline.total_duration,
             );
         }
-        self.publish_project();
+        self.publish_caption_edit();
     }
 
     /// Every section that draws caption text or the undo state a caption
@@ -3186,6 +3221,14 @@ impl EditorWindow {
     /// the re-render is skipped while playing exactly as `emitRenderFrame`'s
     /// `if (!editorState.playing)` gate does (`:493`).
     pub(crate) fn publish_project(&self) {
+        self.publish_project_config(true);
+    }
+
+    pub(crate) fn publish_caption_edit(&self) {
+        self.publish_project_config(!self.caption_edit_hides_caption());
+    }
+
+    fn publish_project_config(&self, redraw_paused_frame: bool) {
         if !self.project_ready() {
             return;
         }
@@ -3235,7 +3278,7 @@ impl EditorWindow {
             }
         }
         instance.project_config.0.send(preview).ok();
-        if !self.playing {
+        if redraw_paused_frame && !self.playing {
             request_frame(
                 instance,
                 paused_preview_frame(self.playhead, self.view.preview_time),
@@ -3247,13 +3290,17 @@ impl EditorWindow {
     /// The disk half: restart the 250ms timer, then write on the background
     /// executor. A later edit drops this task, which is `clearTimeout` plus a
     /// fresh `setTimeout`.
-    pub(crate) fn schedule_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.schedule_project_save(cx);
+    }
+
+    pub(crate) fn schedule_project_save(&mut self, cx: &mut Context<Self>) {
         if !self.project_ready() {
             return;
         }
         self.pending_save.borrow_mut().queue(self.project.clone());
         let pending = self.pending_save.clone();
-        self.save_task = Some(cx.spawn_in(window, async move |_, cx| {
+        self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PROJECT_SAVE_DEBOUNCE).await;
             let Some(save) = pending.borrow().snapshot() else {
                 return;

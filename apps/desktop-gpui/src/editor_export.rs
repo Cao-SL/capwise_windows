@@ -735,6 +735,7 @@ impl EditorWindow {
 
     pub(crate) fn open_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.clear_redaction_tool();
+        self.commit_caption_drafts(window, cx);
         self.finish_caption_edit(window, cx);
         self.stop_canvas_text_edit(cx);
         if self.playing {

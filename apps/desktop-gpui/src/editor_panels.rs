@@ -2891,11 +2891,15 @@ impl EditorWindow {
             return;
         }
         let input = cx.new(|cx| {
-            if key.multi_line() {
+            let mut input = if key.multi_line() {
                 ui::TextInputState::multi_line(window, cx)
             } else {
                 ui::TextInputState::single_line(window, cx)
+            };
+            if matches!(key, FieldKey::CaptionText(_)) {
+                input.defer_ime_changes();
             }
+            input
         });
         self.push_text_subscription(cx.subscribe_in(
             &input,
@@ -3130,7 +3134,7 @@ impl EditorWindow {
     ) {
         match event {
             ui::TextInputEvent::Changed => {
-                self.begin_field_edit(key);
+                self.begin_field_edit(key, cx);
                 self.commit_field(key, false, window, cx);
             }
             ui::TextInputEvent::Confirmed | ui::TextInputEvent::Cancelled => {
@@ -3146,7 +3150,7 @@ impl EditorWindow {
         }
     }
 
-    fn begin_field_edit(&mut self, key: FieldKey) {
+    fn begin_field_edit(&mut self, key: FieldKey, cx: &mut Context<Self>) {
         // The crop boxes never write the project, and a bracket held open by a
         // focused box would swallow Save's single history entry.
         if matches!(
@@ -3162,16 +3166,16 @@ impl EditorWindow {
             return;
         }
         // A different field taking over closes the previous bracket first.
-        if self.field_editing.is_some() {
-            let config = self.project.clone();
-            self.history.resume(&config);
-        }
+        self.end_field_edit(cx);
         self.history.pause();
         self.field_editing = Some(key);
     }
 
     pub(crate) fn end_field_edit(&mut self, cx: &mut Context<Self>) {
-        if self.field_editing.take().is_some() {
+        if let Some(key) = self.field_editing.take() {
+            if matches!(key, FieldKey::CaptionText(_)) {
+                self.commit_caption_text_draft(cx);
+            }
             let config = self.project.clone();
             self.history.resume(&config);
             cx.notify();
@@ -3314,13 +3318,12 @@ impl EditorWindow {
                 });
             }
             FieldKey::CaptionText(index) => {
-                if self.edit_caption_text_live(index, text) {
-                    self.schedule_save(window, cx);
-                    self.invalidate_caption_views(cx);
-                }
                 if final_commit {
+                    self.commit_caption_text_draft(cx);
                     self.queue_caption_translation_update(window, cx);
                     self.note_project_edit("caption-text");
+                } else {
+                    self.queue_sidebar_caption_text(index, text, cx);
                 }
             }
             FieldKey::AudioName(index) => {
