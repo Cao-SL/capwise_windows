@@ -268,6 +268,7 @@ impl crate::editor_window::EditorWindow {
         {
             return;
         }
+        self.commit_caption_drafts(window, cx);
         let Some(captions) = self.project.captions.as_ref() else {
             return;
         };
@@ -305,6 +306,7 @@ impl crate::editor_window::EditorWindow {
                     return;
                 }
                 this.sidebar.caption_resplit.running = false;
+                this.commit_caption_drafts(window, cx);
                 if crate::caption_review::caption_content_snapshot(&this.project) != before {
                     cx.notify();
                     return;

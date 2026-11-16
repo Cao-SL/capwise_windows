@@ -574,6 +574,7 @@ pub struct TextInputState {
     selection_reversed: bool,
     /// The IME's composition range, drawn underlined.
     marked_range: Option<Range<usize>>,
+    defer_ime_changes: bool,
     multi_line: bool,
     disabled: bool,
     secret: bool,
@@ -619,6 +620,7 @@ impl TextInputState {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
+            defer_ime_changes: false,
             multi_line,
             disabled: false,
             secret: false,
@@ -666,6 +668,10 @@ impl TextInputState {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    pub(crate) fn defer_ime_changes(&mut self) {
+        self.defer_ime_changes = true;
     }
 
     pub fn shared_text(&self) -> SharedString {
@@ -1441,8 +1447,11 @@ impl EntityInputHandler for TextInputState {
             .map(|range| self.range_to_utf16(range))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.marked_range = None;
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.marked_range.take().is_some() && self.defer_ime_changes {
+            cx.emit(TextInputEvent::Changed);
+            cx.notify();
+        }
     }
 
     /// The composed result -- and every ordinary typed character, because on
@@ -1513,7 +1522,9 @@ impl EntityInputHandler for TextInputState {
         self.selection_reversed = false;
         self.invalidate_layout();
         self.goal_x = None;
-        cx.emit(TextInputEvent::Changed);
+        if !self.defer_ime_changes || self.marked_range.is_none() {
+            cx.emit(TextInputEvent::Changed);
+        }
         cx.notify();
     }
 
@@ -3489,6 +3500,48 @@ mod tests {
                 });
             }
         });
+    }
+
+    #[gpui::test]
+    fn deferred_ime_reports_only_committed_chinese_text(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_empty_window();
+        let changes = Rc::new(RefCell::new(Vec::new()));
+        let observed = changes.clone();
+        let (state, _subscription) = window.update(|window, cx| {
+            let state = cx.new(|cx| {
+                let mut state = TextInputState::multi_line(window, cx);
+                state.defer_ime_changes();
+                state.set_text("原字幕 ", cx);
+                state
+            });
+            let subscription = cx.subscribe(&state, move |state, event, cx| {
+                if matches!(event, TextInputEvent::Changed) {
+                    observed.borrow_mut().push(state.read(cx).text().to_owned());
+                }
+            });
+            (state, subscription)
+        });
+        window.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.replace_and_mark_text_in_range(None, "zhong", None, window, cx);
+                assert_eq!(state.text(), "原字幕 zhong");
+            })
+        });
+        assert!(changes.borrow().is_empty());
+        window.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.replace_text_in_range(None, "中文", window, cx);
+            })
+        });
+        assert_eq!(&*changes.borrow(), &["原字幕 中文"]);
+        window.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.replace_and_mark_text_in_range(None, "输入", None, window, cx);
+            })
+        });
+        assert_eq!(changes.borrow().len(), 1);
+        window.update(|window, cx| state.update(cx, |state, cx| state.unmark_text(window, cx)));
+        assert_eq!(&*changes.borrow(), &["原字幕 中文", "原字幕 中文输入"]);
     }
 
     fn check_invalidated(body: &TextBody, window: &mut Window, cx: &mut App) {

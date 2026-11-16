@@ -2162,6 +2162,7 @@ impl EditorWindow {
         {
             return;
         }
+        self.commit_caption_drafts(window, cx);
         let Some(captions) = self
             .project
             .captions
@@ -2343,6 +2344,7 @@ impl EditorWindow {
                 }
                 this.sidebar.caption_review.progress = None;
                 this.sidebar.caption_review.cancel = None;
+                this.commit_caption_drafts(window, cx);
                 let unchanged = this.project_path == path
                     && caption_content_snapshot(&this.project) == initial_content;
                 let outcome = match result {

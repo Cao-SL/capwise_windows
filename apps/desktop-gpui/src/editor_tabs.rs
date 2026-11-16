@@ -4884,6 +4884,7 @@ impl EditorWindow {
             return;
         }
         self.cancel_caption_processing(cx);
+        self.commit_caption_drafts(window, cx);
         let initial_content = crate::caption_review::caption_content_snapshot(&self.project);
         cx.notify();
 
@@ -4935,6 +4936,7 @@ impl EditorWindow {
                         else {
                             return Ok(false);
                         };
+                        this.commit_caption_drafts(window, cx);
                         if automatic && crate::recording_autocaptions::has_captions(&this.project) {
                             return Ok(false);
                         }
@@ -5105,6 +5107,7 @@ impl EditorWindow {
                         if transcription::refinement_request(&project_path).as_ref()
                             == Some(&request)
                         {
+                            this.commit_caption_drafts(window, cx);
                             let before =
                                 crate::caption_review::caption_content_snapshot(&this.project);
                             let mut next = this.project.clone();

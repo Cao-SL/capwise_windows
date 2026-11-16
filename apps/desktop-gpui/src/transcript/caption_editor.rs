@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, sync::Arc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, time::Duration};
 
 use cap_project::{CaptionSegment, ProjectConfiguration};
 use gpui::{
@@ -11,7 +11,7 @@ use crate::{editor_window::EditorWindow, i18n::tr, theme::Theme, ui};
 
 struct Row {
     id: SharedString,
-    text: SharedString,
+    text: RefCell<SharedString>,
     time: f64,
     output_time: Option<f64>,
 }
@@ -35,7 +35,8 @@ struct DeleteMenu {
 }
 
 pub(super) struct CaptionEditor {
-    rows: Arc<Vec<Row>>,
+    rows: Rc<Vec<Row>>,
+    row_indices: HashMap<SharedString, usize>,
     inputs: Rc<RefCell<HashMap<SharedString, RowInput>>>,
     list: ListState,
     matches: Vec<Match>,
@@ -47,7 +48,8 @@ pub(super) struct CaptionEditor {
 impl Default for CaptionEditor {
     fn default() -> Self {
         Self {
-            rows: Arc::default(),
+            rows: Rc::default(),
+            row_indices: HashMap::new(),
             inputs: Rc::default(),
             list: ListState::new(0, ListAlignment::Top, px(160.)).with_uniform_item_height(px(42.)),
             matches: Vec::new(),
@@ -193,7 +195,7 @@ impl CaptionEditor {
             .flat_map(|captions| &captions.segments)
             .map(|segment| Row {
                 id: segment.id.clone().into(),
-                text: segment.text.clone().into(),
+                text: RefCell::new(segment.text.clone().into()),
                 time: f64::from(segment.start),
                 output_time: output_times.get(segment.id.as_str()).copied(),
             })
@@ -202,7 +204,12 @@ impl CaptionEditor {
         if self.list.item_count() != rows.len() {
             self.list.reset(rows.len());
         }
-        self.rows = Arc::new(rows);
+        self.row_indices = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.id.clone(), index))
+            .collect();
+        self.rows = Rc::new(rows);
     }
 
     fn find(&mut self, query: &str) {
@@ -212,7 +219,7 @@ impl CaptionEditor {
             .iter()
             .enumerate()
             .flat_map(|(row, caption)| {
-                crate::caption_replace::occurrences(&caption.text, query)
+                crate::caption_replace::occurrences(&caption.text.borrow(), query)
                     .into_iter()
                     .map(move |bytes| Match { row, bytes })
             })
@@ -230,6 +237,43 @@ impl EditorWindow {
         editor.refresh(&self.project);
         if let Some(search) = self.transcript.search.as_mut() {
             editor.find(&search.query);
+            search.current = search.current.min(editor.matches.len().saturating_sub(1));
+        }
+    }
+
+    pub(crate) fn update_caption_editor_row(&mut self, source_id: &str) {
+        if !self.transcript.open || !self.transcript.caption_only || self.transcript.dirty {
+            self.transcript.dirty = true;
+            return;
+        }
+        let editor = &mut self.transcript.caption_editor;
+        let Some(&index) = editor.row_indices.get(source_id) else {
+            self.transcript.dirty = true;
+            return;
+        };
+        let Some(segment) = self.project.captions.as_ref().and_then(|captions| {
+            captions
+                .segments
+                .iter()
+                .find(|segment| segment.id == source_id)
+        }) else {
+            self.transcript.dirty = true;
+            return;
+        };
+        let row = &editor.rows[index];
+        if row.time != f64::from(segment.start) {
+            self.transcript.dirty = true;
+            return;
+        }
+        let text: SharedString = segment.text.clone().into();
+        *row.text.borrow_mut() = text.clone();
+        if let Some(search) = &mut self.transcript.search {
+            let first = editor.matches.partition_point(|found| found.row < index);
+            let end = editor.matches.partition_point(|found| found.row <= index);
+            let matches = crate::caption_replace::occurrences(&text, search.query.trim())
+                .into_iter()
+                .map(|bytes| Match { row: index, bytes });
+            editor.matches.splice(first..end, matches);
             search.current = search.current.min(editor.matches.len().saturating_sub(1));
         }
     }
@@ -300,7 +344,7 @@ impl EditorWindow {
         let mut count = 0;
         for found in selected.iter().rev() {
             let row = &editor.rows[found.row];
-            if row.text.get(found.bytes.clone()) == Some(replacement.as_str()) {
+            if row.text.borrow().get(found.bytes.clone()) == Some(replacement.as_str()) {
                 continue;
             }
             updated
@@ -380,7 +424,11 @@ impl EditorWindow {
             return false;
         };
         self.transcript.caption_editor.commit_task = None;
-        edit_caption_text(&mut self.project, &id, text, None)
+        if !edit_caption_text(&mut self.project, &id, text, None) {
+            return false;
+        }
+        self.caption_text_content_changed(&id);
+        true
     }
 
     fn caption_editor_edit(
@@ -394,9 +442,15 @@ impl EditorWindow {
         if !self.transcript.open || !self.transcript.caption_only {
             return;
         }
-        self.edit_caption_content("caption-editor-text", window, cx, move |project| {
-            edit_caption_text(project, id, text, selected)
-        });
+        if self.project_ready()
+            && !self.voiceover.is_busy()
+            && edit_caption_text(&mut self.project, id, text, selected)
+        {
+            self.caption_text_content_changed(id);
+            self.schedule_save(window, cx);
+            self.queue_caption_translation_update(window, cx);
+            self.invalidate_caption_views(cx);
+        }
     }
 
     pub(super) fn dismiss_caption_editor_menu(&mut self) -> bool {
@@ -465,16 +519,18 @@ impl EditorWindow {
             .child(
                 gpui::list(editor.list.clone(), move |index, window, cx| {
                     let row = &rows[index];
+                    let text = row.text.borrow().clone();
                     let mut inputs = inputs.borrow_mut();
                     let input = &inputs
                         .entry(row.id.clone())
                         .or_insert_with(|| {
                             let input = cx.new(|cx| {
                                 let mut input = ui::TextInputState::multi_line(window, cx);
+                                input.defer_ime_changes();
                                 input.set_placeholder(
                                     tr::editor::workbench::caption_text_placeholder(),
                                 );
-                                input.set_text(row.text.clone(), cx);
+                                input.set_text(text.clone(), cx);
                                 input
                             });
                             let window = window.window_handle();
@@ -522,9 +578,9 @@ impl EditorWindow {
                         })
                         .input;
                     if pending_id.as_ref() != Some(&row.id)
-                        && input.read(cx).text() != row.text.as_ref()
+                        && input.read(cx).text() != text.as_ref()
                     {
-                        input.update(cx, |input, cx| input.set_text(row.text.clone(), cx));
+                        input.update(cx, |input, cx| input.set_text(text, cx));
                     }
                     caption_row(
                         &theme,
