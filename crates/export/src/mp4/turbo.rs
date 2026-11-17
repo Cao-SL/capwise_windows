@@ -92,7 +92,14 @@ fn plan(total_frames: u32, fps: u32, cores: usize, requested: Option<usize>) -> 
 /// repeated source frames that libx264 makes nearly free, so matching it
 /// takes 3 steps more quality; at 15 fps 2 steps less still beats it.
 fn constant_quality(bpp: f32, fps: u32) -> u8 {
-    const POINTS: [(f32, f32); 4] = [(0.04, 22.0), (0.08, 20.0), (0.15, 18.0), (0.3, 15.0)];
+    const POINTS: [(f32, f32); 6] = [
+        (0.04, 22.0),
+        (0.08, 20.0),
+        (0.15, 18.0),
+        (0.3, 15.0),
+        (0.5, 15.0),
+        (1.0, 12.0),
+    ];
     let position = bpp.max(f32::MIN_POSITIVE).log2();
     let crf = POINTS
         .windows(2)
@@ -1137,7 +1144,8 @@ mod tests {
             assert_eq!(constant_quality(compression.bits_per_pixel(), 60), crf - 3);
             assert_eq!(constant_quality(compression.bits_per_pixel(), 15), crf + 2);
         }
-        assert_eq!(constant_quality(1.0, 30), 15);
+        assert_eq!(constant_quality(0.5, 30), 15);
+        assert_eq!(constant_quality(1.0, 30), 12);
         assert_eq!(constant_quality(0.01, 30), 22);
         assert_eq!(constant_quality(0.0, 30), 22);
         assert_eq!(constant_quality(0.3, 120), 12);

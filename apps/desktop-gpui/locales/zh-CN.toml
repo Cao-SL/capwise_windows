@@ -3353,6 +3353,11 @@ oauth_expired = "{name} 登录已过期，请在设置里重新登录。"
 [ai.asr.doubao]
 name = "豆包语音"
 note = "云端识别 · 支持逐字时间；会上传音频，按服务计费。"
+stream_duration = "流式识别 2.0（小时版）"
+stream_concurrent = "流式识别 2.0（并发版）"
+legacy_flash = "极速版（已有权限）"
+stream_access = "请检查当前 API Key 是否有权使用 {resource}。请求日志 ID：{log_id}。"
+file_resource = "此资源需要可下载的音频链接。识别本地录屏请选择流式识别 2.0，并在豆包语音控制台开通对应资源。"
 
 [ai.asr.siliconflow]
 name = "硅基流动"

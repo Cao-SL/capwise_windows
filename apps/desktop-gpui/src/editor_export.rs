@@ -322,7 +322,7 @@ impl Drop for ExportUi {
 }
 
 const BPP_MIN: f32 = 0.02;
-const BPP_MAX: f32 = 0.5;
+const BPP_MAX: f32 = 1.0;
 const BPP_STEP: f32 = 0.01;
 
 impl ExportUi {
