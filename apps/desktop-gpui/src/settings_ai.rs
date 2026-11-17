@@ -400,7 +400,10 @@ impl SettingsWindow {
             .iter()
             .map(|id| llm::DiscoveredModel {
                 id: (*id).to_string(),
-                display_name: None,
+                display_name: (target.kind == ModelKind::Asr && target.id == "doubao")
+                    .then(|| asr_cloud::doubao_model_label(id))
+                    .flatten()
+                    .map(str::to_owned),
             })
             .collect()
     }

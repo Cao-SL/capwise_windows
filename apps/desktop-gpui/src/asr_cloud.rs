@@ -3,10 +3,8 @@
 //!
 //! Audio is cut in the middle of pauses, the pieces are sent a few at a time,
 //! and what comes back is put on the recording's timeline as caption lines.
-//! Three request styles cover the services: Doubao's recorded-file "flash"
-//! call (per-word times), an OpenAI-style `/audio/transcriptions` upload, and
-//! an audio-capable `/chat/completions` model. Services that return no times
-//! get their sentences spread over the piece by length.
+
+mod doubao_stream;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,7 +21,7 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
-    DoubaoFlash,
+    Doubao,
     OpenAiTranscriptions,
     ChatAudio,
     /// llama.cpp's `llama-server` running Qwen3-ASR on this Mac.
@@ -116,10 +114,14 @@ pub static SERVICES: &[AsrService] = &[
         id: "doubao",
         name: tr::ai::asr::doubao::name,
         note: tr::ai::asr::doubao::note,
-        protocol: Protocol::DoubaoFlash,
+        protocol: Protocol::Doubao,
         base_url: cap_utils::speech::RECOGNITION_ENDPOINT,
-        models: &["bigmodel"],
-        key_url: Some("https://console.volcengine.com/speech/new/experience/asr"),
+        models: &[
+            doubao_stream::DURATION,
+            doubao_stream::CONCURRENT,
+            "bigmodel",
+        ],
+        key_url: Some(cap_utils::speech::API_KEY_URL),
         needs_key: true,
         context: ContextMode::Doubao,
         chunk_target: 300.0,
@@ -233,6 +235,15 @@ static LLAMA_QWEN: AsrService = AsrService {
 
 pub fn service(id: &str) -> Option<&'static AsrService> {
     SERVICES.iter().find(|service| service.id == id)
+}
+
+pub(crate) fn doubao_model_label(model: &str) -> Option<&'static str> {
+    Some(match model {
+        doubao_stream::DURATION => tr::ai::asr::doubao::stream_duration(),
+        doubao_stream::CONCURRENT => tr::ai::asr::doubao::stream_concurrent(),
+        "bigmodel" => tr::ai::asr::doubao::legacy_flash(),
+        _ => return None,
+    })
 }
 
 pub fn is_cloud_model(model: &str) -> bool {
@@ -365,12 +376,14 @@ struct Word {
 }
 
 #[derive(Debug, Deserialize)]
-struct FlashResponse {
-    result: Option<FlashResult>,
+struct DoubaoResponse {
+    result: Option<DoubaoResult>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct FlashResult {
+struct DoubaoResult {
+    #[serde(default)]
+    text: String,
     #[serde(default)]
     utterances: Vec<Utterance>,
 }
@@ -538,6 +551,16 @@ struct Request<'a> {
     context: &'a str,
 }
 
+fn doubao_options(model: &str, context: &str) -> Value {
+    let mut options = json!({
+        "model_name": model, "enable_itn": true, "enable_punc": true, "show_utterances": true
+    });
+    if !context.is_empty() {
+        options["corpus"] = json!({ "context": context });
+    }
+    options
+}
+
 async fn send_once(
     client: &reqwest::Client,
     request: &Request<'_>,
@@ -554,11 +577,14 @@ async fn send_once(
     let name = (service.name)();
     let unreadable = || Failure::Fatal(tr::asr::unreadable(name));
     let builder = match service.protocol {
-        Protocol::DoubaoFlash => {
-            let mut options = json!({ "model_name": endpoint.model, "enable_itn": true, "enable_punc": true, "show_utterances": true });
-            if !context.is_empty() {
-                options["corpus"] = json!({ "context": context });
+        Protocol::Doubao => {
+            if doubao_stream::selected(&endpoint.model) {
+                return doubao_stream::recognize(request, wav, duration_ms).await;
             }
+            if matches!(endpoint.model.trim(), "volc.seedasr.auc" | "volc.bigasr.auc") {
+                return Err(Failure::Fatal(tr::ai::asr::doubao::file_resource().to_string()));
+            }
+            let options = doubao_options(&endpoint.model, context);
             let audio = base64::engine::general_purpose::STANDARD.encode(wav);
             client
                 .post(format!("{base}/auc/bigmodel/recognize/flash"))
@@ -623,7 +649,7 @@ async fn send_once(
     }
 
     match service.protocol {
-        Protocol::DoubaoFlash => {
+        Protocol::Doubao => {
             // Doubao answers 200 and reports the outcome in a header.
             let code = header(&response, "X-Api-Status-Code");
             let detail = header(&response, "X-Api-Message");
@@ -646,7 +672,7 @@ async fn send_once(
                     Failure::Fatal(message)
                 });
             }
-            let parsed: FlashResponse = response.json().await.map_err(|_| unreadable())?;
+            let parsed: DoubaoResponse = response.json().await.map_err(|_| unreadable())?;
             Ok(parsed.result.unwrap_or_default().utterances)
         }
         Protocol::OpenAiTranscriptions => {
@@ -962,14 +988,31 @@ fn run(
         context: &context,
     };
     let total = samples.len() as f64 / SAMPLE_RATE as f64;
-    let chunks = plan_chunks(
-        &silence_midpoints(samples),
-        total,
-        service.chunk_target,
-        service.chunk_max,
+    let streaming =
+        service.protocol == Protocol::Doubao && doubao_stream::selected(&endpoint.model);
+    let (target, maximum) = if streaming {
+        (25.0, 40.0)
+    } else {
+        (service.chunk_target, service.chunk_max)
+    };
+    let concurrency = if streaming && endpoint.model.trim() == doubao_stream::CONCURRENT {
+        1
+    } else {
+        CONCURRENCY
+    };
+    let chunks = plan_chunks(&silence_midpoints(samples), total, target, maximum);
+    tracing::info!(
+        service = service.id,
+        pieces = chunks.len(),
+        seconds = total,
+        "speech recognition"
     );
-    tracing::info!(service = service.id, pieces = chunks.len(), seconds = total, "speech recognition");
-    let client = reqwest::Client::new();
+    let client = if service.protocol == Protocol::LlamaAsr {
+        crate::local_qwen::loopback_client()
+    } else {
+        reqwest::Client::builder().build()
+    }
+    .map_err(|error| tr::asr::connection_failed((service.name)(), &error.to_string()))?;
 
     tokio::runtime::Handle::current().block_on(async {
         let results: Vec<Result<(f64, Vec<Utterance>), String>> =
@@ -980,7 +1023,7 @@ fn run(
                 let (client, request) = (&client, &request);
                 async move { recognize(client, request, piece).await.map(|found| (start, found)) }
             }))
-            .buffered(CONCURRENCY)
+            .buffered(concurrency)
             .collect()
             .await;
         Ok(segments_from(results.into_iter().collect::<Result<Vec<_>, _>>()?))
@@ -1048,7 +1091,7 @@ mod tests {
                 {"start_time":800,"end_time":1000,"text":"欢"},{"start_time":1000,"end_time":1200,"text":"迎"},{"start_time":1200,"end_time":1400,"text":"来"},
                 {"start_time":1400,"end_time":1600,"text":"到"},{"start_time":1600,"end_time":1800,"text":"灵"},{"start_time":1800,"end_time":2000,"text":"录"},
                 {"start_time":2000,"end_time":2200,"text":"的"},{"start_time":2200,"end_time":2400,"text":"演"},{"start_time":2400,"end_time":2600,"text":"示"}]}]}}"#;
-        let parsed: FlashResponse = serde_json::from_str(raw).unwrap();
+        let parsed: DoubaoResponse = serde_json::from_str(raw).unwrap();
         let segments = segments_from(vec![(10.0, parsed.result.unwrap().utterances)]);
         let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(texts, ["大家好，欢迎来到灵录的演示"]);

@@ -1346,10 +1346,6 @@ impl MainWindow {
                     Ok("modes") => this.open_panel(Panel::ModeInfo, window, cx),
                     _ => {}
                 }
-                // `if (!targetMode) scheduleTargetListPrewarm()` on
-                // `main-window-ready` (`new-main/index.tsx:2528`) -- the point
-                // where the window has its lists and can afford background
-                // work. Here that point is enumeration landing.
                 this.schedule_target_prewarm(window, cx);
                 cx.notify();
             })
@@ -1374,7 +1370,10 @@ impl MainWindow {
     }
 
     fn schedule_target_prewarm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.target_prewarm_allowed(window, cx) || !self.thumbnails.take_prewarm() {
+        if cfg!(windows)
+            || !self.target_prewarm_allowed(window, cx)
+            || !self.thumbnails.take_prewarm()
+        {
             return;
         }
 

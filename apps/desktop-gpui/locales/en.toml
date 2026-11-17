@@ -3355,6 +3355,11 @@ oauth_expired = "{name} sign-in has expired. Sign in again in Settings."
 [ai.asr.doubao]
 name = "Doubao Speech"
 note = "Cloud recognition with word timing. Audio is uploaded; service charges apply."
+stream_duration = "Streaming 2.0 (billed by the hour)"
+stream_concurrent = "Streaming 2.0 (concurrency plan)"
+legacy_flash = "Flash (existing access)"
+stream_access = "Check that this API key has access to {resource}. Request log ID: {log_id}."
+file_resource = "This resource needs a downloadable audio URL. For a local recording, select Streaming 2.0 and enable its resource in the Doubao Speech console."
 
 [ai.asr.siliconflow]
 name = "SiliconFlow"

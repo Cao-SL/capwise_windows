@@ -540,6 +540,15 @@ impl Actor {
         }
     }
 
+    fn schedule_actor_shutdown(actor: ActorRef<Self>) {
+        // The current handler has to return before a full mailbox can accept the stop signal.
+        drop(tokio::spawn(async move {
+            if let Err(error) = actor.stop_gracefully().await {
+                warn!(%error, "Studio actor could not enqueue shutdown");
+            }
+        }));
+    }
+
     async fn handle_stop(
         &mut self,
         discard: bool,
@@ -570,12 +579,7 @@ impl Actor {
             let error = anyhow!(failure.error.clone());
             if failure.capture_stopped && self.all_tracks_stopped {
                 let error = anyhow::Error::new(StudioCaptureStoppedError::new(error));
-                let error = match ctx.actor_ref().stop_gracefully().await {
-                    Ok(()) => error,
-                    Err(stop_error) => error.context(format!(
-                        "Studio actor stop acknowledgement failed: {stop_error}"
-                    )),
-                };
+                Self::schedule_actor_shutdown(ctx.actor_ref());
                 return Err(error);
             }
             return Err(error);
@@ -604,12 +608,7 @@ impl Actor {
                     Ok((cursors, _)) => cursors,
                     Err(error) if studio_capture_stopped(&error) => {
                         let error = self.preserve_failure_evidence(error);
-                        let error = match ctx.actor_ref().stop_gracefully().await {
-                            Ok(()) => error,
-                            Err(stop_error) => error.context(format!(
-                                "Studio actor stop acknowledgement failed: {stop_error}"
-                            )),
-                        };
+                        Self::schedule_actor_shutdown(ctx.actor_ref());
                         return Err(error);
                     }
                     Err(error) => return Err(error),
@@ -619,15 +618,7 @@ impl Actor {
             _ => return Err(anyhow!("Not recording")),
         };
 
-        if let Err(stop_error) = ctx.actor_ref().stop_gracefully().await {
-            let error = anyhow!("Studio actor stop acknowledgement failed: {stop_error}");
-            let error = if self.all_tracks_stopped {
-                anyhow::Error::new(StudioCaptureStoppedError::new(error))
-            } else {
-                error
-            };
-            return Err(self.preserve_failure_evidence(error));
-        }
+        Self::schedule_actor_shutdown(ctx.actor_ref());
 
         #[cfg(target_os = "linux")]
         let known_failure = {
@@ -4038,6 +4029,28 @@ mod tests {
     async fn stop_diagnostics_retain_segment_counts_when_final_metadata_cannot_be_saved() {
         use cap_utils::operation_diagnostics::{Operation, snapshot};
 
+        struct StopWithFullMailbox;
+
+        impl Message<StopWithFullMailbox> for Actor {
+            type Reply = anyhow::Result<CompletedRecording>;
+
+            async fn handle(
+                &mut self,
+                _: StopWithFullMailbox,
+                ctx: &mut Context<Self, Self::Reply>,
+            ) -> Self::Reply {
+                let actor = ctx.actor_ref();
+                for _ in 0..64 {
+                    actor.tell(IsPaused).try_send().unwrap();
+                }
+                assert!(matches!(
+                    actor.tell(IsPaused).try_send(),
+                    Err(kameo::error::SendError::MailboxFull(_))
+                ));
+                self.handle_stop(false, ctx).await
+            }
+        }
+
         for fail_metadata in [false, true] {
             for count in [1, 2] {
                 let directory = tempfile::tempdir().unwrap();
@@ -4116,7 +4129,14 @@ mod tests {
                     display_notch: None,
                     markers: crate::markers::RecordingMarkers::new(None),
                 });
-                let result = actor.ask(Stop).await;
+                let result = tokio::time::timeout(Duration::from_secs(5), async {
+                    actor.ask(StopWithFullMailbox).await
+                })
+                .await
+                .expect("Studio stop stalled with a full mailbox");
+                tokio::time::timeout(Duration::from_secs(5), actor.wait_for_stop())
+                    .await
+                    .expect("Studio actor did not shut down");
                 if fail_metadata {
                     assert!(result.is_err());
                 } else {

@@ -227,6 +227,13 @@ fn free_port() -> Result<u16, String> {
         .map_err(|error| format!("No free local port: {error}"))
 }
 
+pub(crate) fn loopback_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 fn start_server() -> Result<Server, String> {
     let binary =
         server_binary().ok_or_else(|| tr::transcription::qwen_missing_server().to_string())?;
@@ -261,30 +268,35 @@ fn start_server() -> Result<Server, String> {
 
     let health = format!("{}/health", server.base_url);
     let started = Instant::now();
-    let client = reqwest::Client::new();
+    let client = loopback_client().map_err(|error| error.to_string())?;
     loop {
         if let Ok(Some(status)) = server.child.try_wait() {
             return Err(format!(
                 "llama-server exited while loading the model ({status})"
             ));
         }
-        let ready = tokio::runtime::Handle::current().block_on(async {
+        let result = tokio::runtime::Handle::current().block_on(async {
             client
                 .get(&health)
                 .timeout(Duration::from_secs(2))
                 .send()
                 .await
-                .is_ok_and(|response| response.status().is_success())
         });
-        if ready {
-            tracing::info!(
-                ms = started.elapsed().as_millis() as u64,
-                "llama-server ready"
-            );
-            return Ok(server);
-        }
+        let last_failure = match result {
+            Ok(response) if response.status().is_success() => {
+                tracing::info!(
+                    ms = started.elapsed().as_millis() as u64,
+                    "llama-server ready"
+                );
+                return Ok(server);
+            }
+            Ok(response) => response.status().to_string(),
+            Err(error) => error.without_url().to_string(),
+        };
         if started.elapsed() > STARTUP_TIMEOUT {
-            return Err("llama-server did not become ready in time".to_string());
+            return Err(format!(
+                "llama-server did not become ready in time ({last_failure})"
+            ));
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -303,6 +315,34 @@ pub fn transcribe(samples: &[f32], hints: &[String]) -> Result<Vec<CaptionSegmen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn loopback_health_check_reaches_local_server() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/health", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let expected = b"GET /health HTTP/1.1";
+            let mut request = [0; 20];
+            socket.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, expected);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let response = loopback_client()
+            .unwrap()
+            .get(url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        server.await.unwrap();
+    }
 
     #[cfg(unix)]
     fn alive(pid: u32) -> bool {

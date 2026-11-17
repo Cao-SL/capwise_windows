@@ -91,7 +91,7 @@ pub enum BillingResource {
 }
 
 impl BillingResource {
-    fn id(self) -> &'static str {
+    pub(crate) const fn id(self) -> &'static str {
         match self {
             Self::Duration => "volc.seedasr.sauc.duration",
             Self::Concurrent => "volc.seedasr.sauc.concurrent",
@@ -199,7 +199,7 @@ pub fn event_channel() -> (mpsc::Sender<SessionEvent>, mpsc::Receiver<SessionEve
     mpsc::channel(16)
 }
 
-fn packet(message_type: u8, flags: u8, serialization: u8, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn packet(message_type: u8, flags: u8, serialization: u8, payload: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0x11, message_type << 4 | flags, serialization << 4, 0];
     bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     bytes.extend_from_slice(payload);
@@ -264,9 +264,9 @@ enum WireResults {
 }
 
 #[derive(Deserialize)]
-struct WireResponse {
+struct WireResponse<T> {
     code: Option<u32>,
-    result: Option<WireResults>,
+    result: Option<T>,
     error: Option<WireError>,
 }
 
@@ -275,7 +275,15 @@ struct WireError {
     code: u32,
 }
 
-pub fn decode_packet(bytes: &[u8]) -> Result<RecognitionPacket, FollowError> {
+pub(crate) struct WirePacket<T> {
+    pub sequence: Option<i32>,
+    pub final_packet: bool,
+    pub result: Option<T>,
+}
+
+pub(crate) fn decode_response<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<WirePacket<T>, FollowError> {
     if bytes.len() > MAX_FRAME {
         return Err(FollowError::Protocol("response too large"));
     }
@@ -322,7 +330,7 @@ pub fn decode_packet(bytes: &[u8]) -> Result<RecognitionPacket, FollowError> {
         std::str::from_utf8(payload).map_err(|_| FollowError::Protocol("invalid error UTF-8"))?;
         return Err(server_error(code));
     }
-    let response: WireResponse = serde_json::from_slice(payload)
+    let response: WireResponse<T> = serde_json::from_slice(payload)
         .map_err(|_| FollowError::Protocol("invalid recognition JSON"))?;
     if let Some(error) = response.error {
         return Err(server_error(error.code));
@@ -330,7 +338,16 @@ pub fn decode_packet(bytes: &[u8]) -> Result<RecognitionPacket, FollowError> {
     if let Some(code) = response.code.filter(|code| !matches!(code, 0 | 20_000_000)) {
         return Err(server_error(code));
     }
-    let results = match response.result {
+    Ok(WirePacket {
+        sequence,
+        final_packet: flags & 2 != 0,
+        result: response.result,
+    })
+}
+
+pub fn decode_packet(bytes: &[u8]) -> Result<RecognitionPacket, FollowError> {
+    let packet = decode_response(bytes)?;
+    let results = match packet.result {
         None => Vec::new(),
         Some(WireResults::One(result)) => vec![result],
         Some(WireResults::Many(results)) => results,
@@ -351,8 +368,8 @@ pub fn decode_packet(bytes: &[u8]) -> Result<RecognitionPacket, FollowError> {
         });
     }
     Ok(RecognitionPacket {
-        sequence,
-        final_packet: flags & 2 != 0,
+        sequence: packet.sequence,
+        final_packet: packet.final_packet,
         updates,
     })
 }
