@@ -1,0 +1,30 @@
+{
+	"productName": "Capwise",
+	"mainBinaryName": "Capwise",
+	"identifier": "com.capwise.app",
+	"plugins": {
+		"deep-link": null,
+		"updater": {
+			"endpoints": [
+				"https://github.com/Cao-SL/capwise_win/releases/latest/download/latest.json"
+			],
+			"pubkey": "RWRo2C/T2vDO6bcXJlgVTqs0nIbSC6Q30MlJe/PYwmPftTZ0eXS36Tf4"
+		}
+	},
+	"bundle": {
+		"createUpdaterArtifacts": true,
+		"fileAssociations": [
+			{
+				"ext": ["cap"],
+				"name": "Capwise Project",
+				"mimeType": "application/x-cap-project",
+				"role": "Editor"
+			}
+		],
+		"windows": {
+			"nsis": {
+				"installMode": "currentUser"
+			}
+		}
+	}
+}

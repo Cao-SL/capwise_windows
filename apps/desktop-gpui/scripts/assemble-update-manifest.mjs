@@ -26,7 +26,9 @@ if (
 	throw new Error("The installer release must match the manifest version");
 }
 
-const releaseUrl = "https://github.com/joeseesun/capwise/releases/download";
+const releaseUrl =
+	process.env.CAPWISE_RELEASE_URL ??
+	"https://github.com/joeseesun/capwise/releases/download";
 const publicKey = fileURLToPath(
 	new URL("../packaging/updater.pub", import.meta.url),
 );
