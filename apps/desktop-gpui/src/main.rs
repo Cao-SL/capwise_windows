@@ -363,6 +363,8 @@ fn app_runtime() -> tokio::runtime::Runtime {
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    platform::register_app_user_model_id();
     perf_marks::start();
     #[cfg(target_os = "linux")]
     if let Some(threads) = cap_utils::linux_runtime::llvmpipe_thread_count() {
@@ -742,6 +744,13 @@ fn main() {
             {
                 tracing::warn!(%error, "could not install the Windows session end handler");
             }
+            platform::install_window_app_id(&native);
+            if let Err(error) =
+                platform::install_power_event_handler(&native, crate::power::on_windows_power_event)
+            {
+                tracing::warn!(%error, "could not install the Windows power event handler");
+            }
+            platform::install_jump_list();
         })
         .detach();
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]

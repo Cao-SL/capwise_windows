@@ -1386,6 +1386,8 @@ impl EditorWindow {
                     latest = Some((rendered, total));
                 }
                 if let Some((rendered, total)) = latest {
+                    #[cfg(target_os = "windows")]
+                    platform::set_taskbar_progress(rendered as u64, total as u64);
                     let _ = this.update(cx, |this, cx| {
                         if let Some(ui) = this.export.as_mut()
                             && ui.matches_attempt(&cancel)
@@ -1407,6 +1409,9 @@ impl EditorWindow {
                     .timer(Duration::from_millis(50))
                     .await;
             }
+
+            #[cfg(target_os = "windows")]
+            platform::clear_taskbar_progress();
 
             match export.await {
                 Ok(Ok(path)) => {
@@ -1682,6 +1687,8 @@ impl EditorWindow {
                     latest = Some((rendered, total));
                 }
                 if let Some((rendered, total)) = latest {
+                    #[cfg(target_os = "windows")]
+                    platform::set_taskbar_progress(rendered as u64, total as u64);
                     let _ = this.update(cx, |this, cx| {
                         if let Some(ui) = this.export.as_mut()
                             && ui.matches_attempt(&cancel)
@@ -1703,6 +1710,9 @@ impl EditorWindow {
                     .timer(Duration::from_millis(50))
                     .await;
             }
+
+            #[cfg(target_os = "windows")]
+            platform::clear_taskbar_progress();
 
             match export.await {
                 Ok(Ok(path)) => {

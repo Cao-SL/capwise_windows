@@ -17,8 +17,14 @@ use super::{ForcedAppearance, MaterialKind, PanelBehavior};
 
 mod capture_exclusion;
 mod hidden_frame;
+mod jump_list;
+mod power_events;
 mod session_end;
+mod taskbar;
+mod toast;
 mod url_scheme;
+mod window_app_id;
+mod window_chrome;
 
 #[derive(Clone, Copy)]
 pub struct NativeWindow(isize);
@@ -67,7 +73,14 @@ pub fn native_window(window: &Window) -> Option<NativeWindow> {
 }
 
 pub fn install_main_window_frame_policy(native: &NativeWindow) -> std::io::Result<()> {
+    window_chrome::install(native.hwnd(), false);
     hidden_frame::install(native.hwnd())
+}
+
+/// Acrylic + rounded corners for a short-lived panel (teleprompter, pickers).
+/// Mica would keep sampling a desktop that is about to be covered.
+pub fn install_transient_window_chrome(native: &NativeWindow) {
+    window_chrome::install(native.hwnd(), true);
 }
 
 pub fn install_session_end_handler(
@@ -77,10 +90,31 @@ pub fn install_session_end_handler(
     session_end::install(native.hwnd(), on_session_end)
 }
 
+/// `WM_POWERBROADCAST` on the main window: `true` before suspend, `false`
+/// after resume. gpui's Windows platform does not forward it, so a recording
+/// would otherwise die inside sleep.
+pub fn install_power_event_handler(
+    native: &NativeWindow,
+    on_power_event: fn(bool),
+) -> std::io::Result<()> {
+    power_events::install(native.hwnd(), on_power_event)
+}
+
 #[link(name = "dwmapi")]
 unsafe extern "system" {
     fn DwmSetWindowAttribute(hwnd: HWND, attribute: u32, value: *const c_void, size: u32) -> i32;
 }
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetWindowLongW(hwnd: HWND, index: i32) -> i32;
+    fn SetWindowLongW(hwnd: HWND, index: i32, value: i32) -> i32;
+    fn SetLayeredWindowAttributes(hwnd: HWND, key: u32, alpha: u8, flags: u32) -> i32;
+}
+
+const GWL_EXSTYLE: i32 = -20;
+const WS_EX_LAYERED: i32 = 0x0008_0000;
+const LWA_ALPHA: u32 = 0x0000_0002;
 
 pub fn apply_window_theme(
     window: &Window,
@@ -123,6 +157,87 @@ pub fn apply_window_theme(
         .detach();
 }
 
+/// Windows stores the user's accent as `0xAABBGGRR` (ABGR) in the DWM key.
+/// gpui's `rgb()` wants `0x00RRGGBB`, so swap the red and blue bytes.
+fn abgr_to_rgb(abgr: u32) -> u32 {
+    let r = abgr & 0xff;
+    let g = (abgr >> 8) & 0xff;
+    let b = (abgr >> 16) & 0xff;
+    (r << 16) | (g << 8) | b
+}
+
+/// `HKCU\Software\Microsoft\Windows\DWM\AccentColor`, the accent the user
+/// picked in Settings > Personalization > Colors. Returns `None` when the key
+/// is absent or unreadable, so the caller keeps the macOS-default blue.
+pub fn system_accent_color() -> Option<u32> {
+    use windows_sys::Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Registry::{HKEY_CURRENT_USER, RegGetValueW},
+    };
+
+    const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
+
+    let key: Vec<u16> = "Software\\Microsoft\\Windows\\DWM\0"
+        .encode_utf16()
+        .collect();
+    let value: Vec<u16> = "AccentColor\0".encode_utf16().collect();
+    let mut accent = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(accent).cast(),
+            &mut size,
+        )
+    };
+    if status != ERROR_SUCCESS || size != std::mem::size_of::<u32>() as u32 {
+        return None;
+    }
+    let rgb = abgr_to_rgb(accent);
+    (rgb != 0).then_some(rgb)
+}
+
+/// Call before any window exists; see `jump_list::register_app_id`.
+pub fn register_app_user_model_id() {
+    jump_list::register_app_id();
+}
+
+/// Tag a window with the same AUMID so its taskbar button shares the jump list.
+pub fn install_window_app_id(native: &NativeWindow) {
+    window_app_id::install(native.hwnd());
+}
+
+/// Best-effort Windows toast; silently does nothing when WinRT is unavailable.
+pub fn show_toast(title: &str, body: &str) {
+    toast::show(title, body);
+}
+
+/// Enables the taskbar jump list's recent/frequent categories. Safe when shell
+/// integration is unavailable.
+pub fn install_jump_list() {
+    jump_list::install();
+}
+
+/// ITaskbarList3 progress for a long export. The HWND is captured once at the
+/// start of the export; every failure path is a silent no-op.
+pub fn remember_taskbar_window(window: &Window) {
+    if let Some(native) = native_window(window) {
+        taskbar::remember_window(native.hwnd());
+    }
+}
+
+pub fn set_taskbar_progress(completed: u64, total: u64) {
+    taskbar::set_progress(completed, total);
+}
+
+pub fn clear_taskbar_progress() {
+    taskbar::clear();
+}
+
 pub fn window_is_dark(_window: &Window) -> Option<bool> {
     None
 }
@@ -147,8 +262,64 @@ pub fn teleprompter_level() -> isize {
     1
 }
 
-pub fn set_window_alpha(_native: &NativeWindow, _alpha: f64) -> f64 {
-    1.
+/// The teleprompter slider's range, with a fully opaque fallback for a value
+/// that is not a number (the store is plain JSON and can be edited by hand).
+fn clamped_alpha(alpha: f64) -> f64 {
+    if alpha.is_finite() {
+        alpha.clamp(0.45, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Byte the layered-window API expects for a 0.45..1.0 alpha.
+fn alpha_byte(alpha: f64) -> u8 {
+    (clamped_alpha(alpha) * 255.0).round() as u8
+}
+
+/// `NSWindow.setAlphaValue:` on Windows. A layered window with `LWA_ALPHA`
+/// is the closest equivalent: it keeps the gpui D3D surface untouched and
+/// lets DWM blend the whole window, including its caption controls.
+///
+/// Returns the alpha actually applied, matching the macOS probe log. A fully
+/// opaque request clears the layered bit again so a window at 100% stays on
+/// the normal (non-layered) composition path.
+pub fn set_window_alpha(native: &NativeWindow, alpha: f64) -> f64 {
+    let alpha = clamped_alpha(alpha);
+    let hwnd = native.hwnd();
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let layered = style & WS_EX_LAYERED != 0;
+        if alpha >= 1.0 {
+            if layered {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, style & !WS_EX_LAYERED);
+            }
+            return 1.0;
+        }
+        // SetWindowLongW returns the previous value, so 0 is both a legitimate
+        // old style and a failure. Read the style back instead of trusting it.
+        if !layered {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED);
+            if GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED == 0 {
+                tracing::warn!(
+                    error = %std::io::Error::last_os_error(),
+                    "could not make the window layered"
+                );
+                return 1.0;
+            }
+        }
+        if SetLayeredWindowAttributes(hwnd, 0, alpha_byte(alpha), LWA_ALPHA) == 0 {
+            tracing::warn!(
+                error = %std::io::Error::last_os_error(),
+                "could not apply the window alpha"
+            );
+            if !layered {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, style);
+            }
+            return 1.0;
+        }
+    }
+    alpha
 }
 
 /// Whether the window is already left out of screen captures.
@@ -740,10 +911,34 @@ pub fn unregister_escape_hotkey() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Rect, logical_to_physical, overlap_is_visible, physical_to_logical, to_rect};
+    use super::{
+        Rect, abgr_to_rgb, alpha_byte, logical_to_physical, overlap_is_visible,
+        physical_to_logical, to_rect,
+    };
 
     fn display(physical: Rect, logical: Rect) -> super::DisplayGeometry {
         super::DisplayGeometry { physical, logical }
+    }
+
+    #[test]
+    fn the_windows_accent_is_abgr_but_gpui_wants_rgb() {
+        // Windows default blue #0078D4 is stored as 0xFFD47800.
+        assert_eq!(abgr_to_rgb(0xff_d4_78_00), 0x00_78_d4);
+        // The app's fallback blue #007AFF is stored as 0xFFFF7A00.
+        assert_eq!(abgr_to_rgb(0xff_ff_7a_00), 0x00_7a_ff);
+        assert_eq!(abgr_to_rgb(0xff_78_56_34), 0x00_34_56_78);
+        assert_eq!(abgr_to_rgb(0x00_00_00_00), 0x00_00_00_00);
+    }
+
+    #[test]
+    fn alpha_byte_clamps_to_the_teleprompter_slider_range() {
+        assert_eq!(alpha_byte(0.0), 115);
+        assert_eq!(alpha_byte(0.45), 115);
+        assert_eq!(alpha_byte(0.92), 235);
+        assert_eq!(alpha_byte(1.0), 255);
+        assert_eq!(alpha_byte(2.0), 255);
+        assert_eq!(alpha_byte(f64::NAN), 255);
+        assert_eq!(alpha_byte(f64::INFINITY), 255);
     }
 
     #[test]

@@ -45,6 +45,7 @@ jobs:
       RUST_TARGET_TRIPLE: ${{ fromJSON('{"mac-intel":"x86_64-apple-darwin","linux-x64":"x86_64-unknown-linux-gnu","windows-x64":"x86_64-pc-windows-msvc"}')[matrix.platform] }}
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       CARGO_PROFILE_RELEASE_STRIP: symbols
+      WINDOWS_SIGNING_ENABLED: ${{ secrets.WINDOWS_SIGNING_PFX != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -133,12 +134,21 @@ jobs:
       - name: Package Windows candidate
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
         run: |
           node scripts/bundle-gpui.mjs "$RUST_TARGET_TRIPLE" --no-bundle
           node --input-type=module -e 'import {writePlatformConfig} from "./scripts/bundle-gpui.mjs"; await writePlatformConfig("win32");'
           cd apps/desktop-gpui
           output="target/$RUST_TARGET_TRIPLE/release"
           mv "$output/Cap.exe" "$output/Capwise.exe"
+          if [[ "$WINDOWS_SIGNING_ENABLED" == "true" ]]; then
+            pwsh -NoProfile -File ../../scripts/sign-windows-release.ps1 \
+              -Paths "$output/Capwise.exe,$output/cap-cli.exe,$output/cap-muxer.exe" \
+              -PfxBase64 "$WINDOWS_SIGNING_PFX" \
+              -PfxPassword "$WINDOWS_SIGNING_PFX_PASSWORD"
+          fi
           TAURI_APP_PATH="$(pwd -W)" RUSTUP_TOOLCHAIN=1.95.0 bun run tauri bundle \
             --target "$RUST_TARGET_TRIPLE" --bundles nsis --config packaging/windows/capwise-preview.json
           installers=("$output"/bundle/nsis/*.exe)
@@ -153,12 +163,26 @@ jobs:
           cargo test --locked -p cap-utils --lib windows_credentials
           cargo test --locked -p cap-d3d-adapter --lib
 
+      - name: Sign Windows installer
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+          WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          ./scripts/sign-windows-release.ps1 `
+            -Paths "candidate/Capwise-Windows-x64-Setup.exe" `
+            -PfxBase64 $env:WINDOWS_SIGNING_PFX `
+            -PfxPassword $env:WINDOWS_SIGNING_PFX_PASSWORD
+
       - name: Verify installed Windows candidate
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $version = (Select-String -Path apps/desktop-gpui/Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-          ./apps/desktop-gpui/scripts/verify-capwise-windows.ps1 -Installer candidate/Capwise-Windows-x64-Setup.exe -Version $version
+          $signatureArg = @{}
+          if ($env:WINDOWS_SIGNING_ENABLED -eq 'true') { $signatureArg['RequireAuthenticode'] = $true }
+          ./apps/desktop-gpui/scripts/verify-capwise-windows.ps1 -Installer candidate/Capwise-Windows-x64-Setup.exe -Version $version @signatureArg
 
       - name: Record candidate provenance
         shell: bash
