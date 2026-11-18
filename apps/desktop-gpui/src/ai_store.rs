@@ -13,7 +13,65 @@ use crate::{i18n::tr, store};
 const SECTION: &str = "capwise_ai";
 const LLM_DEFAULT: &str = "llmDefault";
 const KEYCHAIN_SERVICE: &str = cap_utils::speech::KEYCHAIN_SERVICE;
+#[cfg(target_os = "macos")]
 const LEGACY_KEYCHAIN_SERVICE: &str = cap_utils::speech::LEGACY_RECOGNITION_SERVICE;
+
+#[cfg(not(target_os = "macos"))]
+mod store_backend {
+    use serde_json::{Map, Value};
+
+    use crate::{i18n::tr, store};
+
+    use super::SECTION;
+
+    const KEYS: &str = "apiKeys";
+
+    pub fn get(account: &str) -> Option<String> {
+        store::store_section(SECTION)
+            .get(KEYS)
+            .and_then(Value::as_object)
+            .and_then(|keys| keys.get(account))
+            .and_then(Value::as_str)
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+    }
+
+    pub fn set(account: &str, key: &str) -> Result<(), String> {
+        write(account, Some(key))
+    }
+
+    pub fn remove(account: &str) -> Result<(), String> {
+        write(account, None)
+    }
+
+    fn write(account: &str, value: Option<&str>) -> Result<(), String> {
+        let written = store::update_store_section(SECTION, |section| {
+            let keys = section
+                .entry(KEYS.to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !keys.is_object() {
+                *keys = Value::Object(Map::new());
+            }
+            let Some(keys) = keys.as_object_mut() else {
+                return false;
+            };
+            match value {
+                Some(key) => {
+                    keys.insert(account.to_string(), Value::String(key.to_string()));
+                }
+                None => {
+                    keys.remove(account);
+                }
+            }
+            true
+        });
+        if written {
+            Ok(())
+        } else {
+            Err(tr::asr::keychain_failed().to_string())
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -129,12 +187,12 @@ fn keychain_get(service: &str, account: &str) -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
-#[cfg(all(windows, not(test)))]
-fn keychain_get(service: &str, account: &str) -> Option<String> {
-    cap_utils::windows_credentials::read(service, account)
+#[cfg(all(target_os = "windows", not(test)))]
+fn keychain_get(_service: &str, account: &str) -> Option<String> {
+    store_backend::get(account)
 }
 
-#[cfg(all(not(any(target_os = "macos", windows)), not(test)))]
+#[cfg(all(not(any(target_os = "macos", target_os = "windows")), not(test)))]
 fn keychain_get(_service: &str, _account: &str) -> Option<String> {
     None
 }
@@ -220,12 +278,11 @@ fn set_key_uncached(kind: Kind, id: &str, key: &str) -> Result<(), String> {
             format!("{} ({status}): {error}", tr::asr::keychain_failed())
         })
     }
-    #[cfg(all(windows, not(test)))]
+    #[cfg(all(target_os = "windows", not(test)))]
     {
-        cap_utils::windows_credentials::write(KEYCHAIN_SERVICE, &account(kind, id), key)
-            .map_err(|error| format!("{}: {error}", tr::asr::keychain_failed()))
+        store_backend::set(&account(kind, id), key)
     }
-    #[cfg(all(not(any(target_os = "macos", windows)), not(test)))]
+    #[cfg(all(not(any(target_os = "macos", target_os = "windows")), not(test)))]
     {
         let _ = (kind, id, key);
         Err(tr::asr::keychain_failed().to_string())
@@ -283,12 +340,11 @@ fn delete_key(kind: Kind, id: &str) -> Result<(), String> {
                 Err(_) => Err(tr::asr::keychain_failed().to_string()),
             }
         }
-        #[cfg(all(windows, not(test)))]
+        #[cfg(all(target_os = "windows", not(test)))]
         {
-            cap_utils::windows_credentials::delete(KEYCHAIN_SERVICE, &account(kind, id))
-                .map_err(|_| tr::asr::keychain_failed().to_string())
+            store_backend::remove(&account(kind, id))
         }
-        #[cfg(all(not(any(target_os = "macos", windows)), not(test)))]
+        #[cfg(all(not(any(target_os = "macos", target_os = "windows")), not(test)))]
         Err(tr::asr::keychain_failed().to_string())
     })
 }

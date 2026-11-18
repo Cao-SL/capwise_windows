@@ -2226,7 +2226,7 @@ impl SettingsWindow {
                     .text_size(px(13.))
                     .when(selected, |this| {
                         this.bg(Theme::with_alpha(
-                            rgb(Theme::SETTINGS_ACCENT),
+                            rgb(Theme::settings_accent()),
                             if theme.is_dark() { 0.22 } else { 0.12 },
                         ))
                         .font_weight(FontWeight::MEDIUM)
@@ -2240,7 +2240,7 @@ impl SettingsWindow {
                             .size(px(16.))
                             .flex_shrink_0()
                             .text_color(if selected {
-                                rgb(Theme::SETTINGS_ACCENT).into()
+                                rgb(Theme::settings_accent()).into()
                             } else {
                                 theme.settings_muted()
                             }),
@@ -2328,7 +2328,7 @@ impl SettingsWindow {
                     .truncate()
                     .cursor_pointer()
                     .when(update_ready, |link| {
-                        link.text_color(rgb(Theme::SETTINGS_ACCENT))
+                        link.text_color(rgb(Theme::settings_accent()))
                     })
                     .hover(|style| style.text_color(theme.settings_text()))
                     .on_click(cx.listener(move |_, _, _, cx| {
@@ -3929,7 +3929,7 @@ impl SettingsWindow {
 
     fn radio_dot(&self, checked: bool) -> gpui::Div {
         let theme = self.theme;
-        let accent: Hsla = rgb(Theme::SETTINGS_ACCENT).into();
+        let accent: Hsla = rgb(Theme::settings_accent()).into();
         div()
             .size(px(16.))
             .flex_none()
